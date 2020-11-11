@@ -9,11 +9,12 @@ import (
     "strconv"
     "mime"
     "strings"
+    "sync"
 )
 
 func main() {
     filenamePtr := flag.String("filename", "", "custom filename")
-    // boostPtr := flag.Int("boost", 8, "number of concurrent downloads")
+    boostPtr := flag.Int("boost", 8, "number of concurrent downloads")
 
     flag.Parse()
 
@@ -23,24 +24,25 @@ func main() {
     var filename string
     var err error
 
-    if *filenamePtr == "" {
-        filesize, filename, err = FetchMetadata(uri)
-        if err != nil {
-            panic(err)
-        }
+    filesize, filename, err = fetchMetadata(uri)
+    if err != nil {
+        panic(err)
+    }
+
+    // Use filename from args if specified
+    if *filenamePtr != "" {
+        filename = *filenamePtr
     }
 
     fmt.Println(filesize)
     fmt.Println(filename)
 
-    err = Fetch(filename, uri)
-    if err != nil {
-        panic(err)
-    }
+    fetch(uri, filesize, *boostPtr)
 
+    return
 }
 
-func FetchMetadata(uri string) (filesize uint64, filename string, err error) {
+func fetchMetadata(uri string) (filesize uint64, filename string, err error) {
     resp, err := http.Head(uri)
     if err != nil {
         return
@@ -69,16 +71,38 @@ func FetchMetadata(uri string) (filesize uint64, filename string, err error) {
     return
 }
 
-func Fetch(filepath string, uri string) (err error) {
-    // Get the data
-    resp, err := http.Get(uri)
+func fetch(uri string, filesize uint64, boost int) {
+    var wg sync.WaitGroup
+
+    for part := 0; part < boost; part++ {
+        start, end := calculatePartBoundaries(filesize, boost, part)
+        wg.Add(1)
+        go fetchPart(&wg, part, uri, start, end)
+    }
+
+    wg.Wait()
+
+    return
+}
+
+func fetchPart(wg *sync.WaitGroup, part int, uri string, start_byte uint64, end_byte uint64) {
+    defer wg.Done()
+
+    byte_range := fmt.Sprintf("bytes=%d-%d", start_byte, end_byte)
+    req, _ := http.NewRequest("GET", uri, nil)
+    req.Header.Set("Range", byte_range)
+    req.Header.Set("User-Agent", "Fetch/1.0")
+
+    client := &http.Client{}
+    resp, err := client.Do(req)
     if err != nil {
         return
     }
     defer resp.Body.Close()
 
     // Create the file
-    out, err := os.Create(filepath)
+    filename := fmt.Sprintf("download.part%d", part)
+    out, err := os.Create(filename)
     if err != nil {
         return
     }
@@ -86,5 +110,29 @@ func Fetch(filepath string, uri string) (err error) {
 
     // Write the body to file
     _, err = io.Copy(out, resp.Body)
+
+    return
+}
+
+func calculatePartBoundaries(filesize uint64, total_parts int, part int) (start_byte uint64, end_byte uint64) {
+    chunk_size := filesize / uint64(total_parts)
+    var previous_end_byte uint64
+
+    if part == 0 {
+        start_byte = 0
+        previous_end_byte = 0
+    } else {
+        // part is zero indexed so the multiplication is like using the previous part
+        start_byte = uint64(part) * chunk_size
+        previous_end_byte = start_byte - 1
+    }
+
+    // For the last part, pick up all remaining bytes
+    if part == (total_parts - 1) {
+      end_byte = filesize - 1
+    } else {
+      end_byte = previous_end_byte + chunk_size - 1
+    }
+
     return
 }
