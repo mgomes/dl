@@ -38,6 +38,7 @@ func main() {
     fmt.Println(filename)
 
     fetch(uri, filesize, *boostPtr)
+    concatFiles(filename, *boostPtr)
 
     return
 }
@@ -101,7 +102,7 @@ func fetchPart(wg *sync.WaitGroup, part int, uri string, start_byte uint64, end_
     defer resp.Body.Close()
 
     // Create the file
-    filename := fmt.Sprintf("download.part%d", part)
+    filename := downloadPartFilename(part)
     out, err := os.Create(filename)
     if err != nil {
         return
@@ -132,6 +133,38 @@ func calculatePartBoundaries(filesize uint64, total_parts int, part int) (start_
       end_byte = filesize - 1
     } else {
       end_byte = previous_end_byte + chunk_size - 1
+    }
+
+    return
+}
+
+func downloadPartFilename(part int) string {
+    return fmt.Sprintf("download.part%d", part)
+}
+
+func concatFiles(filename string, parts int) {
+    var readers []io.Reader
+
+    for part := 0; part < parts; part++ {
+        downloadPart, err := os.Open(downloadPartFilename(part))
+        if err != nil {
+            panic(err)
+        }
+        defer os.Remove(downloadPartFilename(part))
+        defer downloadPart.Close()
+        readers = append(readers, downloadPart)
+    }
+
+    inputFiles := io.MultiReader(readers...)
+
+    outFile, err := os.Create(filename)
+    if err != nil {
+        panic(err)
+    }
+
+    _, err = io.Copy(outFile, inputFiles)
+    if err != nil {
+        panic(err)
     }
 
     return
