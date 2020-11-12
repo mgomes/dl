@@ -76,7 +76,7 @@ func fetch(uri string, filesize uint64, boost int) {
     var wg sync.WaitGroup
 
     for part := 0; part < boost; part++ {
-        start, end := calculatePartBoundaries(filesize, boost, part)
+        start, end := calculatePartBoundary(filesize, boost, part)
         wg.Add(1)
         go fetchPart(&wg, part, uri, start, end)
     }
@@ -115,7 +115,7 @@ func fetchPart(wg *sync.WaitGroup, part int, uri string, start_byte uint64, end_
     return
 }
 
-func calculatePartBoundaries(filesize uint64, total_parts int, part int) (start_byte uint64, end_byte uint64) {
+func calculatePartBoundary(filesize uint64, total_parts int, part int) (start_byte uint64, end_byte uint64) {
     chunk_size := filesize / uint64(total_parts)
     var previous_end_byte uint64
 
