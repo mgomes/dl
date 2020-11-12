@@ -59,14 +59,14 @@ func fetchMetadata(uri string) (filesize uint64, filename string, err error) {
     contentDisposition := resp.Header.Get("Content-Disposition")
     _, params, err := mime.ParseMediaType(contentDisposition)
     if err != nil {
-        return filesize, "", nil
+        filename = filenameFromURI(uri)
+        return filesize, filename, nil
     }
     filename = params["filename"]
 
     // No filename specified in the header; use the pathname
     if filename == "" {
-        splitUri := strings.Split(uri, "/")
-        filename = splitUri[len(splitUri)-1]
+        filename = filenameFromURI(uri)
     }
 
     return
@@ -140,6 +140,11 @@ func calculatePartBoundaries(filesize uint64, total_parts int, part int) (start_
 
 func downloadPartFilename(part int) string {
     return fmt.Sprintf("download.part%d", part)
+}
+
+func filenameFromURI(uri string) string {
+    splitUri := strings.Split(uri, "/")
+    return splitUri[len(splitUri)-1]
 }
 
 func concatFiles(filename string, parts int) {
