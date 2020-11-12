@@ -123,16 +123,15 @@ func calculatePartBoundary(filesize uint64, total_parts int, part int) (start_by
         start_byte = 0
         previous_end_byte = 0
     } else {
-        // part is zero indexed so the multiplication is like using the previous part
-        start_byte = uint64(part) * chunk_size
-        previous_end_byte = start_byte - 1
+        previous_end_byte = uint64(part) * chunk_size - 1
+        start_byte = previous_end_byte + 1
     }
 
     // For the last part, pick up all remaining bytes
     if part == (total_parts - 1) {
       end_byte = filesize - 1
     } else {
-      end_byte = previous_end_byte + chunk_size - 1
+      end_byte = start_byte + chunk_size - 1
     }
 
     return
