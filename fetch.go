@@ -59,7 +59,7 @@ func fetchMetadata(uri string) (filesize uint64, filename string, err error) {
     contentDisposition := resp.Header.Get("Content-Disposition")
     _, params, err := mime.ParseMediaType(contentDisposition)
     if err != nil {
-        return
+        return filesize, "", nil
     }
     filename = params["filename"]
 
