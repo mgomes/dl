@@ -1,4 +1,4 @@
-# Fetch (WIP)
+# dl (WIP)
 
 Can potentially increase your download speeds by downloading files with concurrent streams.
 
