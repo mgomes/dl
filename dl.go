@@ -36,7 +36,6 @@ func main() {
 		filename = *filenamePtr
 	}
 
-	fmt.Println(filesize)
 	fmt.Println(filename)
 
 	fetch(uri, filesize, *boostPtr)
