@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/schollz/progressbar/v3"
 )
 
 func main() {
@@ -38,7 +40,7 @@ func main() {
 	fmt.Println(filename)
 
 	fetch(uri, filesize, *boostPtr)
-	concatFiles(filename, *boostPtr)
+	concatFiles(filename, filesize, *boostPtr)
 
 	return
 }
@@ -75,10 +77,15 @@ func fetchMetadata(uri string) (filesize uint64, filename string, err error) {
 func fetch(uri string, filesize uint64, boost int) {
 	var wg sync.WaitGroup
 
+	bar := progressbar.DefaultBytes(
+		int64(filesize),
+		"Downloading",
+	)
+
 	for part := 0; part < boost; part++ {
 		start, end := calculatePartBoundary(filesize, boost, part)
 		wg.Add(1)
-		go fetchPart(&wg, part, uri, start, end)
+		go fetchPart(&wg, part, uri, start, end, bar)
 	}
 
 	wg.Wait()
@@ -86,7 +93,7 @@ func fetch(uri string, filesize uint64, boost int) {
 	return
 }
 
-func fetchPart(wg *sync.WaitGroup, part int, uri string, startByte uint64, endByte uint64) {
+func fetchPart(wg *sync.WaitGroup, part int, uri string, startByte uint64, endByte uint64, bar *progressbar.ProgressBar) {
 	defer wg.Done()
 
 	byteRange := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
@@ -110,7 +117,7 @@ func fetchPart(wg *sync.WaitGroup, part int, uri string, startByte uint64, endBy
 	defer out.Close()
 
 	// Write the body to file
-	_, err = io.Copy(out, resp.Body)
+	_, err = io.Copy(io.MultiWriter(out, bar), resp.Body)
 
 	return
 }
@@ -146,8 +153,13 @@ func filenameFromURI(uri string) string {
 	return splitURI[len(splitURI)-1]
 }
 
-func concatFiles(filename string, parts int) {
+func concatFiles(filename string, filesize uint64, parts int) {
 	var readers []io.Reader
+
+	bar := progressbar.DefaultBytes(
+		int64(filesize),
+		"Combining",
+	)
 
 	for part := 0; part < parts; part++ {
 		downloadPart, err := os.Open(downloadPartFilename(part))
@@ -166,7 +178,7 @@ func concatFiles(filename string, parts int) {
 		panic(err)
 	}
 
-	_, err = io.Copy(outFile, inputFiles)
+	_, err = io.Copy(io.MultiWriter(outFile, bar), inputFiles)
 	if err != nil {
 		panic(err)
 	}
