@@ -157,7 +157,7 @@ func concatFiles(filename string, filesize uint64, parts int) {
 
 	bar := progressbar.DefaultBytes(
 		int64(filesize),
-		"Combining",
+		"Combining  ",
 	)
 
 	for part := 0; part < parts; part++ {
