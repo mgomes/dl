@@ -92,7 +92,7 @@ func fetchPart(wg *sync.WaitGroup, part int, uri string, startByte uint64, endBy
 	byteRange := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
 	req, _ := http.NewRequest("GET", uri, nil)
 	req.Header.Set("Range", byteRange)
-	req.Header.Set("User-Agent", "Fetch/1.0")
+	req.Header.Set("User-Agent", "dl/1.0")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
