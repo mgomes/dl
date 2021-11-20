@@ -20,26 +20,28 @@ func main() {
 
 	flag.Parse()
 
-	uri := flag.Args()[0]
+	file_uris := flag.Args()
 
 	var filesize uint64
 	var filename string
 	var err error
 
-	filesize, filename, err = fetchMetadata(uri)
-	if err != nil {
-		panic(err)
+	for _, uri := range file_uris {
+		filesize, filename, err = fetchMetadata(uri)
+		if err != nil {
+			panic(err)
+		}
+
+		// Use filename from args if specified
+		if *filenamePtr != "" {
+			filename = *filenamePtr
+		}
+
+		fmt.Println(filename)
+
+		fetch(uri, filesize, *boostPtr)
+		concatFiles(filename, filesize, *boostPtr)
 	}
-
-	// Use filename from args if specified
-	if *filenamePtr != "" {
-		filename = *filenamePtr
-	}
-
-	fmt.Println(filename)
-
-	fetch(uri, filesize, *boostPtr)
-	concatFiles(filename, filesize, *boostPtr)
 
 	return
 }
