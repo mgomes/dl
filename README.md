@@ -16,7 +16,7 @@ After you've installed Go:
 ## Usage
 
 ```
-dl <file url>
+dl <file url> [file2 url] [file3 url] ...
 ```
 
 ### Custom Filename
