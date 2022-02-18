@@ -36,3 +36,13 @@ The boost will set the concurrency level. In typical concurrency scenarios you w
 ```
 dl <file url> -boost 8
 ```
+
+### Custom Working Directory
+
+By default, `dl` will use the current working directory to store the temporary downloaded parts. If you are downloading to an external disk, you may want to use an internal disk as the working directory. This will speed up the concatenation process after the download is complete.
+
+To override this and set your own working directory you can:
+
+```
+dl <file url> -workdir ~/Somewhere/Else
+```

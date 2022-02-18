@@ -4,9 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 func main() {
 	filenamePtr := flag.String("filename", "", "custom filename")
 	boostPtr := flag.Int("boost", 8, "number of concurrent downloads")
+	workingDirPtr := flag.String("workdir", "", "working directory for downloads")
 
 	flag.Parse()
 
@@ -24,6 +27,7 @@ func main() {
 
 	var filesize uint64
 	var filename string
+	var workingDir string
 	var err error
 
 	for _, uri := range file_uris {
@@ -37,13 +41,20 @@ func main() {
 			filename = *filenamePtr
 		}
 
+		if *workingDirPtr != "" {
+			workingDir = *workingDirPtr
+		} else {
+			workingDir, err = os.Getwd()
+			if err != nil {
+				log.Println(err)
+			}
+		}
+
 		fmt.Println(filename)
 
-		fetch(uri, filesize, *boostPtr)
-		concatFiles(filename, filesize, *boostPtr)
+		fetch(uri, filesize, workingDir, *boostPtr)
+		concatFiles(filename, filesize, *boostPtr, workingDir)
 	}
-
-	return
 }
 
 func fetchMetadata(uri string) (filesize uint64, filename string, err error) {
@@ -75,7 +86,7 @@ func fetchMetadata(uri string) (filesize uint64, filename string, err error) {
 	return
 }
 
-func fetch(uri string, filesize uint64, boost int) {
+func fetch(uri string, filesize uint64, dir string, boost int) {
 	var wg sync.WaitGroup
 
 	bar := progressbar.DefaultBytes(
@@ -86,15 +97,13 @@ func fetch(uri string, filesize uint64, boost int) {
 	for part := 0; part < boost; part++ {
 		start, end := calculatePartBoundary(filesize, boost, part)
 		wg.Add(1)
-		go fetchPart(&wg, part, uri, start, end, bar)
+		go fetchPart(&wg, part, uri, dir, start, end, bar)
 	}
 
 	wg.Wait()
-
-	return
 }
 
-func fetchPart(wg *sync.WaitGroup, part int, uri string, startByte uint64, endByte uint64, bar *progressbar.ProgressBar) {
+func fetchPart(wg *sync.WaitGroup, part int, uri string, dir string, startByte uint64, endByte uint64, bar *progressbar.ProgressBar) {
 	defer wg.Done()
 
 	byteRange := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
@@ -110,7 +119,7 @@ func fetchPart(wg *sync.WaitGroup, part int, uri string, startByte uint64, endBy
 	defer resp.Body.Close()
 
 	// Create the file
-	filename := downloadPartFilename(part)
+	filename := downloadPartFilename(part, dir)
 	out, err := os.Create(filename)
 	if err != nil {
 		return
@@ -118,9 +127,7 @@ func fetchPart(wg *sync.WaitGroup, part int, uri string, startByte uint64, endBy
 	defer out.Close()
 
 	// Write the body to file
-	_, err = io.Copy(io.MultiWriter(out, bar), resp.Body)
-
-	return
+	_, _ = io.Copy(io.MultiWriter(out, bar), resp.Body)
 }
 
 func calculatePartBoundary(filesize uint64, totalParts int, part int) (startByte uint64, endByte uint64) {
@@ -145,8 +152,8 @@ func calculatePartBoundary(filesize uint64, totalParts int, part int) (startByte
 	return
 }
 
-func downloadPartFilename(part int) string {
-	return fmt.Sprintf("download.part%d", part)
+func downloadPartFilename(part int, dir string) string {
+	return path.Join(dir, fmt.Sprintf("download.part%d", part))
 }
 
 func filenameFromURI(uri string) string {
@@ -154,7 +161,7 @@ func filenameFromURI(uri string) string {
 	return splitURI[len(splitURI)-1]
 }
 
-func concatFiles(filename string, filesize uint64, parts int) {
+func concatFiles(filename string, filesize uint64, parts int, dir string) {
 	var readers []io.Reader
 
 	bar := progressbar.DefaultBytes(
@@ -163,11 +170,11 @@ func concatFiles(filename string, filesize uint64, parts int) {
 	)
 
 	for part := 0; part < parts; part++ {
-		downloadPart, err := os.Open(downloadPartFilename(part))
+		downloadPart, err := os.Open(downloadPartFilename(part, dir))
 		if err != nil {
 			panic(err)
 		}
-		defer os.Remove(downloadPartFilename(part))
+		defer os.Remove(downloadPartFilename(part, dir))
 		defer downloadPart.Close()
 		readers = append(readers, downloadPart)
 	}
@@ -183,6 +190,4 @@ func concatFiles(filename string, filesize uint64, parts int) {
 	if err != nil {
 		panic(err)
 	}
-
-	return
 }
