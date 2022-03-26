@@ -7,9 +7,11 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -57,6 +59,19 @@ func main() {
 				panic(err)
 			}
 		}
+
+		sigc := make(chan os.Signal, 1)
+		signal.Notify(sigc,
+			syscall.SIGHUP,
+			syscall.SIGINT,
+			syscall.SIGTERM,
+			syscall.SIGQUIT)
+		go func() {
+			sig := <-sigc
+			fmt.Printf("\n%s; cleaning up...\n", sig)
+			dl.cleanupParts()
+			os.Exit(0)
+		}()
 
 		fmt.Println(dl.filename)
 
@@ -152,6 +167,8 @@ func (dl *download) filenameFromURI() string {
 func (dl *download) ConcatFiles() {
 	var readers []io.Reader
 
+	defer dl.cleanupParts()
+
 	bar := progressbar.DefaultBytes(
 		int64(dl.filesize),
 		"Combining  ",
@@ -162,7 +179,6 @@ func (dl *download) ConcatFiles() {
 		if err != nil {
 			panic(err)
 		}
-		defer os.Remove(part.downloadPartFilename())
 		defer downloadPart.Close()
 		readers = append(readers, downloadPart)
 	}
@@ -177,5 +193,11 @@ func (dl *download) ConcatFiles() {
 	_, err = io.Copy(io.MultiWriter(outFile, bar), inputFiles)
 	if err != nil {
 		panic(err)
+	}
+}
+
+func (dl *download) cleanupParts() {
+	for _, part := range dl.parts {
+		os.Remove(part.downloadPartFilename())
 	}
 }
