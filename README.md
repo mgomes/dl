@@ -26,7 +26,7 @@ By default, `dl` will use the file's HTTP metadata when available for the filena
 To override this and set your own filename you can:
 
 ```
-dl <file url> -filename blah.zip
+dl -filename blah.zip <file url>
 ```
 
 ### Boost
@@ -34,7 +34,7 @@ dl <file url> -filename blah.zip
 The boost will set the concurrency level. In typical concurrency scenarios you want to set this to the number of CPU threads available... however, to be courteous the network host we recommend keeping this at the default value of `8`. A higher value doesn't always lead to faster downloads anyway. At some concurrency level, your network throughput will saturate
 
 ```
-dl <file url> -boost 8
+dl -boost 8 <file url>
 ```
 
 ### Custom Working Directory
@@ -44,5 +44,5 @@ By default, `dl` will use the current working directory to store the temporary d
 To override this and set your own working directory you can:
 
 ```
-dl <file url> -workdir ~/Somewhere/Else
+dl -workdir ~/Somewhere/Else <file url>
 ```
