@@ -4,11 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"mime"
 	"net/http"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,17 +15,12 @@ import (
 )
 
 type download struct {
-	uri      string
-	filesize uint64
-	filename string
-}
-
-type downloadPart struct {
-	index     int
-	uri       string
-	dir       string
-	startByte uint64
-	endByte   uint64
+	uri        string
+	filesize   uint64
+	filename   string
+	workingDir string
+	boost      int
+	parts      []downloadPart
 }
 
 func main() {
@@ -39,13 +32,14 @@ func main() {
 
 	file_uris := flag.Args()
 
-	var dl download
-	var workingDir string
 	var err error
 
 	for _, uri := range file_uris {
+		var dl download
 		dl.uri = uri
-		dl.filesize, dl.filename, err = fetchMetadata(dl.uri)
+		dl.boost = *boostPtr
+
+		err = dl.FetchMetadata()
 		if err != nil {
 			panic(err)
 		}
@@ -56,51 +50,52 @@ func main() {
 		}
 
 		if *workingDirPtr != "" {
-			workingDir = *workingDirPtr
+			dl.workingDir = *workingDirPtr
 		} else {
-			workingDir, err = os.Getwd()
+			dl.workingDir, err = os.Getwd()
 			if err != nil {
-				log.Println(err)
+				panic(err)
 			}
 		}
 
 		fmt.Println(dl.filename)
 
-		fetch(&dl, workingDir, *boostPtr)
-		concatFiles(dl.filename, dl.filesize, *boostPtr, workingDir)
+		dl.Fetch()
+		dl.ConcatFiles()
 	}
 }
 
-func fetchMetadata(uri string) (filesize uint64, filename string, err error) {
-	resp, err := http.Head(uri)
+func (dl *download) FetchMetadata() error {
+	resp, err := http.Head(dl.uri)
 	if err != nil {
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
 	contentLength := resp.Header.Get("Content-Length")
-	filesize, err = strconv.ParseUint(contentLength, 0, 64)
+	dl.filesize, err = strconv.ParseUint(contentLength, 0, 64)
 	if err != nil {
-		return
+		return err
 	}
 
 	contentDisposition := resp.Header.Get("Content-Disposition")
 	_, params, err := mime.ParseMediaType(contentDisposition)
 	if err != nil {
-		filename = filenameFromURI(uri)
-		return filesize, filename, nil
+		dl.filename = dl.filenameFromURI()
+		return err
+	} else {
+		dl.filename = params["filename"]
 	}
-	filename = params["filename"]
 
 	// No filename specified in the header; use the pathname
-	if filename == "" {
-		filename = filenameFromURI(uri)
+	if dl.filename == "" {
+		dl.filename = dl.filenameFromURI()
 	}
 
-	return
+	return nil
 }
 
-func fetch(dl *download, dir string, boost int) {
+func (dl *download) Fetch() error {
 	var wg sync.WaitGroup
 
 	bar := progressbar.DefaultBytes(
@@ -108,51 +103,27 @@ func fetch(dl *download, dir string, boost int) {
 		"Downloading",
 	)
 
-	for i := 0; i < boost; i++ {
-		start, end := calculatePartBoundary(dl.filesize, boost, i)
+	for i := 0; i < dl.boost; i++ {
+		start, end := dl.calculatePartBoundary(i)
 		wg.Add(1)
 		dlPart := downloadPart{
 			index:     i,
 			uri:       dl.uri,
-			dir:       dir,
+			dir:       dl.workingDir,
 			startByte: start,
 			endByte:   end,
 		}
-		go fetchPart(&wg, dlPart, bar)
+		dlPart.filename = dlPart.downloadPartFilename()
+		dl.parts = append(dl.parts, dlPart)
+		go dlPart.fetchPart(&wg, bar)
 	}
 
 	wg.Wait()
+	return nil
 }
 
-func fetchPart(wg *sync.WaitGroup, part downloadPart, bar *progressbar.ProgressBar) {
-	defer wg.Done()
-
-	byteRange := fmt.Sprintf("bytes=%d-%d", part.startByte, part.endByte)
-	req, _ := http.NewRequest("GET", part.uri, nil)
-	req.Header.Set("Range", byteRange)
-	req.Header.Set("User-Agent", "dl/1.0")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	// Create the file
-	filename := downloadPartFilename(part.index, part.dir)
-	out, err := os.Create(filename)
-	if err != nil {
-		return
-	}
-	defer out.Close()
-
-	// Write the body to file
-	_, _ = io.Copy(io.MultiWriter(out, bar), resp.Body)
-}
-
-func calculatePartBoundary(filesize uint64, totalParts int, part int) (startByte uint64, endByte uint64) {
-	chunkSize := filesize / uint64(totalParts)
+func (dl *download) calculatePartBoundary(part int) (startByte uint64, endByte uint64) {
+	chunkSize := dl.filesize / uint64(dl.boost)
 	var previousEndByte uint64
 
 	if part == 0 {
@@ -164,8 +135,8 @@ func calculatePartBoundary(filesize uint64, totalParts int, part int) (startByte
 	}
 
 	// For the last part, pick up all remaining bytes
-	if part == (totalParts - 1) {
-		endByte = filesize - 1
+	if part == (dl.boost - 1) {
+		endByte = dl.filesize - 1
 	} else {
 		endByte = startByte + chunkSize - 1
 	}
@@ -173,36 +144,32 @@ func calculatePartBoundary(filesize uint64, totalParts int, part int) (startByte
 	return
 }
 
-func downloadPartFilename(index int, dir string) string {
-	return path.Join(dir, fmt.Sprintf("download.part%d", index))
-}
-
-func filenameFromURI(uri string) string {
-	splitURI := strings.Split(uri, "/")
+func (dl *download) filenameFromURI() string {
+	splitURI := strings.Split(dl.uri, "/")
 	return splitURI[len(splitURI)-1]
 }
 
-func concatFiles(filename string, filesize uint64, parts int, dir string) {
+func (dl *download) ConcatFiles() {
 	var readers []io.Reader
 
 	bar := progressbar.DefaultBytes(
-		int64(filesize),
+		int64(dl.filesize),
 		"Combining  ",
 	)
 
-	for i := 0; i < parts; i++ {
-		downloadPart, err := os.Open(downloadPartFilename(i, dir))
+	for _, part := range dl.parts {
+		downloadPart, err := os.Open(part.downloadPartFilename())
 		if err != nil {
 			panic(err)
 		}
-		defer os.Remove(downloadPartFilename(i, dir))
+		defer os.Remove(part.downloadPartFilename())
 		defer downloadPart.Close()
 		readers = append(readers, downloadPart)
 	}
 
 	inputFiles := io.MultiReader(readers...)
 
-	outFile, err := os.Create(filename)
+	outFile, err := os.Create(dl.filename)
 	if err != nil {
 		panic(err)
 	}
