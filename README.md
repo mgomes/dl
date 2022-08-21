@@ -1,6 +1,6 @@
-# dl (WIP)
+# dl
 
-Can potentially increase your download speeds by downloading files with concurrent streams.
+Downloads files utilizing concurrent connections. For ISPs, this can really increase download speeds.
 
 Written as a proof of concept to compare against the Crystal version of the same utility: https://github.com/mgomes/grab
 
