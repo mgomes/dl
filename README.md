@@ -1,6 +1,6 @@
 # dl
 
-Downloads files utilizing concurrent connections. For ISPs, this can really increase download speeds.
+Downloads files utilizing concurrent connections. For some ISPs, this can really increase download speeds.
 
 Written as a proof of concept to compare against the Crystal version of the same utility: https://github.com/mgomes/grab
 
