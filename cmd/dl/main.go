@@ -16,6 +16,29 @@ import (
 	"github.com/schollz/progressbar/v3"
 )
 
+// offsetWriter implements io.Writer by writing to an io.WriterAt
+// at a specific offset, advancing offset after each Write call.
+type offsetWriter struct {
+	w      io.WriterAt
+	offset int64
+}
+
+// Write writes len(p) bytes from p to the underlying data stream
+// at offsetWriter.offset. Then offsetWriter.offset is incremented
+// by the number of bytes written.
+func (ow *offsetWriter) Write(p []byte) (int, error) {
+	n, err := ow.w.WriteAt(p, ow.offset)
+	ow.offset += int64(n)
+	return n, err
+}
+
+type downloadPart struct {
+	index     int
+	uri       string
+	startByte uint64
+	endByte   uint64
+}
+
 type download struct {
 	uri           string
 	filesize      uint64
@@ -50,7 +73,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Use filename from args if specified
+		// Override filename if specified
 		if *filenamePtr != "" {
 			dl.filename = *filenamePtr
 		}
@@ -67,33 +90,30 @@ func main() {
 			dl.workingDir = wd
 		}
 
-		// Signal handling for cleanup
+		// Handle signals (to allow cleanup if needed)
 		sigc := make(chan os.Signal, 1)
 		signal.Notify(sigc, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 		go func() {
 			sig := <-sigc
-			fmt.Printf("\nReceived signal %s; cleaning up...\n", sig)
-			dl.cleanupParts()
+			fmt.Printf("\nReceived signal %s; aborting download...\n", sig)
+			// If you want to remove the partially downloaded file on abort:
+			_ = os.Remove(dl.outputPath())
 			os.Exit(1)
 		}()
 
 		fmt.Println("Downloading:", dl.filename)
 
-		// If the server does not support partial downloads and boost > 1, fallback to a single download stream
+		// If the server does not support partial downloads and boost > 1, fallback to single download
 		if !dl.supportsRange && dl.boost > 1 {
 			fmt.Println("Server does not support partial content. Falling back to single-threaded download.")
 			dl.boost = 1
 		}
 
+		// Perform the download
 		if err := dl.Fetch(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error while downloading parts: %v\n", err)
-			dl.cleanupParts()
-			os.Exit(1)
-		}
-
-		if err := dl.ConcatFiles(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error combining files: %v\n", err)
-			dl.cleanupParts()
+			fmt.Fprintf(os.Stderr, "Error while downloading: %v\n", err)
+			// Remove partially downloaded file upon error
+			_ = os.Remove(dl.outputPath())
 			os.Exit(1)
 		}
 
@@ -113,19 +133,19 @@ func (dl *download) FetchMetadata() error {
 		return fmt.Errorf("missing Content-Length header, cannot determine file size")
 	}
 
-	dl.filesize, err = strconv.ParseUint(contentLength, 0, 64)
+	dl.filesize, err = strconv.ParseUint(contentLength, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid Content-Length: %w", err)
 	}
 
 	// Check if server supports range requests
 	acceptRanges := resp.Header.Get("Accept-Ranges")
-	dl.supportsRange = (strings.ToLower(acceptRanges) == "bytes")
+	dl.supportsRange = strings.ToLower(acceptRanges) == "bytes"
 
+	// Try to determine filename
 	contentDisposition := resp.Header.Get("Content-Disposition")
 	_, params, err := mime.ParseMediaType(contentDisposition)
 	if err != nil {
-		// If we fail to parse or filename not found, fallback to extracting from URI
 		dl.filename = dl.filenameFromURI()
 	} else {
 		dl.filename = params["filename"]
@@ -137,84 +157,144 @@ func (dl *download) FetchMetadata() error {
 	return nil
 }
 
+// Fetch downloads the file. If boost=1 or partial content not supported,
+// it fetches in a single request. Otherwise, it launches multiple goroutines
+// for parallel range requests, each writing to the correct position of the same file.
 func (dl *download) Fetch() error {
-	var wg sync.WaitGroup
+	// Create/Truncate the final file up front
+	outFile, err := os.Create(dl.outputPath())
+	if err != nil {
+		return fmt.Errorf("cannot create output file: %w", err)
+	}
+	defer outFile.Close()
 
-	errCh := make(chan error, dl.boost) // Collect errors from goroutines
-	defer close(errCh)
+	// We set the file size right away (optional, but can be useful on some OSes)
+	if dl.boost > 1 && dl.supportsRange {
+		if err = outFile.Truncate(int64(dl.filesize)); err != nil {
+			return fmt.Errorf("error setting file size: %w", err)
+		}
+	}
 
+	// Create a progress bar spanning the entire file
 	bar := progressbar.DefaultBytes(
 		int64(dl.filesize),
 		"Downloading",
 	)
 
-	// If boost == 1 or server does not support ranges, just download whole file at once
-	if dl.boost == 1 {
-		part := downloadPart{
-			index:     0,
-			uri:       dl.uri,
-			dir:       dl.workingDir,
-			startByte: 0,
-			endByte:   dl.filesize - 1,
+	if dl.boost == 1 || !dl.supportsRange {
+		// Single-stream download
+		req, err := http.NewRequest("GET", dl.uri, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
 		}
-		part.filename = part.downloadPartFilename()
-		dl.parts = append(dl.parts, part)
+		req.Header.Set("User-Agent", "dl/1.0")
 
-		wg.Add(1)
-		go part.fetchPart(&wg, bar, errCh)
-		wg.Wait()
-
-		select {
-		case err := <-errCh:
-			return err
-		default:
-			return nil
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("single-stream download failed: %w", err)
 		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return fmt.Errorf("non-2xx status (%d) for single-stream", resp.StatusCode)
+		}
+
+		// Write everything to offset=0 in the final file
+		ow := &offsetWriter{
+			w:      outFile,
+			offset: 0,
+		}
+		_, err = io.Copy(io.MultiWriter(ow, bar), resp.Body)
+		return err
 	}
 
-	// Multi-part download
+	// Multi-part parallel download
+	var wg sync.WaitGroup
+	errCh := make(chan error, dl.boost)
+
+	// Prepare chunk boundaries
+	dl.parts = make([]downloadPart, dl.boost)
 	for i := 0; i < dl.boost; i++ {
 		start, end := dl.calculatePartBoundary(i)
-		wg.Add(1)
-		dlPart := downloadPart{
+		dl.parts[i] = downloadPart{
 			index:     i,
 			uri:       dl.uri,
-			dir:       dl.workingDir,
 			startByte: start,
 			endByte:   end,
 		}
-		dlPart.filename = dlPart.downloadPartFilename()
-		dl.parts = append(dl.parts, dlPart)
-		go dlPart.fetchPart(&wg, bar, errCh)
 	}
 
+	// Launch goroutines
+	for _, part := range dl.parts {
+		wg.Add(1)
+		go func(dp downloadPart) {
+			defer wg.Done()
+			if err := dl.fetchPartRange(dp, outFile, bar); err != nil {
+				errCh <- err
+			}
+		}(part)
+	}
+
+	// Wait until all parts complete
 	wg.Wait()
+	close(errCh)
 
-	// Check for errors
-	select {
-	case err := <-errCh:
-		return err
-	default:
-		return nil
+	// If any part failed, return the first error
+	for e := range errCh {
+		if e != nil {
+			return e
+		}
 	}
+	return nil
 }
 
-func (dl *download) calculatePartBoundary(part int) (startByte uint64, endByte uint64) {
-	chunkSize := dl.filesize / uint64(dl.boost)
-	if part == 0 {
-		startByte = 0
-	} else {
-		startByte = uint64(part) * chunkSize
+// fetchPartRange downloads the specific byte range for a part
+// and writes it to the corresponding offset in outFile.
+func (dl *download) fetchPartRange(p downloadPart, outFile *os.File, bar *progressbar.ProgressBar) error {
+	// Construct the range header
+	byteRange := fmt.Sprintf("bytes=%d-%d", p.startByte, p.endByte)
+	req, err := http.NewRequest("GET", p.uri, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request for part %d: %w", p.index, err)
+	}
+	req.Header.Set("Range", byteRange)
+	req.Header.Set("User-Agent", "dl/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to download part %d: %w", p.index, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("non-2xx status (%d) for part %d", resp.StatusCode, p.index)
 	}
 
-	// For the last part, pick up all remaining bytes
-	if part == (dl.boost - 1) {
+	// Write directly to the correct offset
+	ow := &offsetWriter{
+		w:      outFile,
+		offset: int64(p.startByte),
+	}
+	if _, copyErr := io.Copy(io.MultiWriter(ow, bar), resp.Body); copyErr != nil {
+		return fmt.Errorf("error writing part %d: %w", p.index, copyErr)
+	}
+
+	return nil
+}
+
+// calculatePartBoundary calculates the start and end bytes for a part index.
+func (dl *download) calculatePartBoundary(part int) (uint64, uint64) {
+	chunkSize := dl.filesize / uint64(dl.boost)
+	startByte := uint64(part) * chunkSize
+	var endByte uint64
+
+	// Last part gets any remaining bytes
+	if part == dl.boost-1 {
 		endByte = dl.filesize - 1
 	} else {
 		endByte = startByte + chunkSize - 1
 	}
-
-	return
+	return startByte, endByte
 }
 
 func (dl *download) filenameFromURI() string {
@@ -222,51 +302,6 @@ func (dl *download) filenameFromURI() string {
 	return splitURI[len(splitURI)-1]
 }
 
-func (dl *download) ConcatFiles() error {
-	// Verify that all parts exist
-	for _, part := range dl.parts {
-		if _, err := os.Stat(part.downloadPartFilename()); err != nil {
-			return fmt.Errorf("missing part file: %s, error: %w", part.downloadPartFilename(), err)
-		}
-	}
-
-	var readers []io.Reader
-
-	bar := progressbar.DefaultBytes(
-		int64(dl.filesize),
-		"Combining  ",
-	)
-
-	for _, part := range dl.parts {
-		downloadPart, err := os.Open(part.downloadPartFilename())
-		if err != nil {
-			return fmt.Errorf("error opening part file: %w", err)
-		}
-		defer downloadPart.Close()
-		readers = append(readers, downloadPart)
-	}
-
-	inputFiles := io.MultiReader(readers...)
-
-	outFile, err := os.Create(dl.filename)
-	if err != nil {
-		return fmt.Errorf("error creating output file: %w", err)
-	}
-	defer outFile.Close()
-
-	_, err = io.Copy(io.MultiWriter(outFile, bar), inputFiles)
-	if err != nil {
-		return fmt.Errorf("error concatenating files: %w", err)
-	}
-
-	// Cleanup only after successful concatenation
-	dl.cleanupParts()
-
-	return nil
-}
-
-func (dl *download) cleanupParts() {
-	for _, part := range dl.parts {
-		os.Remove(part.downloadPartFilename())
-	}
+func (dl *download) outputPath() string {
+	return fmt.Sprintf("%s%c%s", dl.workingDir, os.PathSeparator, dl.filename)
 }
