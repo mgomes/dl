@@ -2,11 +2,13 @@
 
 Downloads files utilizing concurrent connections. For some ISPs, this can really increase download speeds.
 
-Written as a proof of concept to compare against the Crystal version of the same utility: https://github.com/mgomes/grab
-
 ## Install
 
-Since this is currently a WIP, a release version is not yet available. Installing `dl` currently requires compiling it from source.
+### Download (recommended)
+
+Download the latest compiled release of `dl` from the [releases page](https://github.com/mgomes/dl/releases).
+
+### Compiling from source
 
 After you've installed Go:
 
@@ -31,7 +33,7 @@ dl -filename blah.zip <file url>
 
 ### Boost
 
-The boost will set the concurrency level. In typical concurrency scenarios you want to set this to the number of CPU threads available... however, to be courteous the network host we recommend keeping this at the default value of `8`. A higher value doesn't always lead to faster downloads anyway. At some concurrency level, your network throughput will saturate
+The boost will set the concurrency level. In typical concurrency scenarios you want to set this to the number of CPU threads available... however, we recommend keeping this at the default value of `8`. A higher value doesn't always lead to faster downloads. At some concurrency level, your network throughput will saturate.
 
 ```
 dl -boost 8 <file url>
@@ -39,10 +41,4 @@ dl -boost 8 <file url>
 
 ### Custom Working Directory
 
-By default, `dl` will use the current working directory to store the temporary downloaded parts. If you are downloading to an external disk, you may want to use an internal disk as the working directory. This will speed up the concatenation process after the download is complete.
-
-To override this and set your own working directory you can:
-
-```
-dl -workdir ~/Somewhere/Else <file url>
-```
+As of `dl` version 1.1, temporary files are no longer generated.

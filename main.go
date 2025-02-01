@@ -52,13 +52,12 @@ type download struct {
 func main() {
 	filenamePtr := flag.String("filename", "", "custom filename")
 	boostPtr := flag.Int("boost", 8, "number of concurrent downloads")
-	workingDirPtr := flag.String("workdir", "", "working directory for downloads")
 
 	flag.Parse()
 
 	fileURIs := flag.Args()
 	if len(fileURIs) == 0 {
-		fmt.Fprintln(os.Stderr, "No URI provided.")
+		fmt.Fprintln(os.Stderr, "No download URI(s) provided.")
 		os.Exit(1)
 	}
 
@@ -78,17 +77,12 @@ func main() {
 			dl.filename = *filenamePtr
 		}
 
-		// Determine working directory
-		if *workingDirPtr != "" {
-			dl.workingDir = *workingDirPtr
-		} else {
-			wd, err := os.Getwd()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting working directory: %v\n", err)
-				os.Exit(1)
-			}
-			dl.workingDir = wd
+		wd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting working directory: %v\n", err)
+			os.Exit(1)
 		}
+		dl.workingDir = wd
 
 		// Handle signals (to allow cleanup if needed)
 		sigc := make(chan os.Signal, 1)
@@ -187,7 +181,7 @@ func (dl *download) Fetch() error {
 		if err != nil {
 			return fmt.Errorf("failed to create request: %w", err)
 		}
-		req.Header.Set("User-Agent", "dl/1.0")
+		req.Header.Set("User-Agent", "dl/1.1.1")
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
