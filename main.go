@@ -242,14 +242,24 @@ func (dl *download) Fetch() error {
 	return nil
 }
 
-// fetchPartRange downloads the specific byte range for a part
-// and writes it to the corresponding offset in outFile.
 func (dl *download) fetchPartRange(p downloadPart, outFile *os.File, bar *progressbar.ProgressBar) error {
-	// Construct the range header
+	var lastErr error
+	for i := 0; i < 3; i++ { // up to 3 attempts
+		err := dl.fetchPartOnce(p, outFile, bar)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		fmt.Printf("Part %d failed (attempt %d), retrying...\n", p.index, i+1)
+	}
+	return fmt.Errorf("part %d failed after 3 retries: %w", p.index, lastErr)
+}
+
+func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progressbar.ProgressBar) error {
 	byteRange := fmt.Sprintf("bytes=%d-%d", p.startByte, p.endByte)
 	req, err := http.NewRequest("GET", p.uri, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request for part %d: %w", p.index, err)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Range", byteRange)
 	req.Header.Set("User-Agent", "dl/1.0")
@@ -264,7 +274,6 @@ func (dl *download) fetchPartRange(p downloadPart, outFile *os.File, bar *progre
 		return fmt.Errorf("non-2xx status (%d) for part %d", resp.StatusCode, p.index)
 	}
 
-	// Write directly to the correct offset
 	ow := &offsetWriter{
 		w:      outFile,
 		offset: int64(p.startByte),
@@ -272,7 +281,6 @@ func (dl *download) fetchPartRange(p downloadPart, outFile *os.File, bar *progre
 	if _, copyErr := io.Copy(io.MultiWriter(ow, bar), resp.Body); copyErr != nil {
 		return fmt.Errorf("error writing part %d: %w", p.index, copyErr)
 	}
-
 	return nil
 }
 
