@@ -52,6 +52,10 @@ type download struct {
 func main() {
 	filenamePtr := flag.String("filename", "", "custom filename")
 	boostPtr := flag.Int("boost", 8, "number of concurrent downloads")
+	if *boostPtr < 1 {
+		fmt.Fprintln(os.Stderr, "Boost must be greater than 0")
+		os.Exit(1)
+	}
 
 	flag.Parse()
 
@@ -262,7 +266,7 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Range", byteRange)
-	req.Header.Set("User-Agent", "dl/1.0")
+	req.Header.Set("User-Agent", "dl/1.1.1")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -301,7 +305,14 @@ func (dl *download) calculatePartBoundary(part int) (uint64, uint64) {
 
 func (dl *download) filenameFromURI() string {
 	splitURI := strings.Split(dl.uri, "/")
-	return splitURI[len(splitURI)-1]
+	filename := splitURI[len(splitURI)-1]
+	// Remove any query parameters
+	if idx := strings.Index(filename, "?"); idx != -1 {
+		filename = filename[:idx]
+	}
+	// Remove any URL encoding
+	filename = strings.ReplaceAll(filename, "%20", " ")
+	return filename
 }
 
 func (dl *download) outputPath() string {
