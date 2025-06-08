@@ -1,0 +1,8 @@
+# Sample .dlrc configuration file
+# Copy this file to ~/.dlrc and customize as needed
+
+# Number of concurrent connections (default: 8)
+boost = 8
+
+# Maximum retries for failed parts (default: 3)
+retries = 3
