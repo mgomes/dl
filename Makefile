@@ -99,15 +99,22 @@ clean:
 
 # Install locally
 .PHONY: install
-install: build
+install:
 	@echo "Installing $(BINARY_NAME)..."
-	@cp $(BINARY_NAME) $(GOPATH)/bin/$(BINARY_NAME) || cp $(BINARY_NAME) ~/go/bin/$(BINARY_NAME)
+	@$(GO) install $(LDFLAGS) .
+	@echo "Installed to $(shell go env GOPATH)/bin/$(BINARY_NAME)"
+	@if ! echo $$PATH | grep -q "$(shell go env GOPATH)/bin"; then \
+		echo ""; \
+		echo "⚠️  Warning: $(shell go env GOPATH)/bin is not in your PATH"; \
+		echo "Add this to your shell config:"; \
+		echo '  export PATH="$$HOME/go/bin:$$PATH"'; \
+	fi
 
 # Uninstall
 .PHONY: uninstall
 uninstall:
 	@echo "Uninstalling $(BINARY_NAME)..."
-	@rm -f $(GOPATH)/bin/$(BINARY_NAME) ~/go/bin/$(BINARY_NAME)
+	@rm -f $(shell go env GOPATH)/bin/$(BINARY_NAME)
 
 # Run a test download
 .PHONY: test-download
