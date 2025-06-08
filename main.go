@@ -132,13 +132,17 @@ type config struct {
 
 const (
 	// HTTP client timeouts
-	httpTimeout         = 30 * time.Second
+	httpTimeout         = 30 * time.Second  // For HEAD requests and initial connections
 	idleConnTimeout     = 90 * time.Second
 	tlsHandshakeTimeout = 10 * time.Second
 	
 	// Connection pool settings
 	maxIdleConns        = 100
 	maxIdleConnsPerHost = 10
+	
+	// Download settings
+	minDownloadTimeout  = 60 * time.Second   // Minimum timeout for downloads
+	timeoutPerMB        = 3 * time.Second    // Additional timeout per MB of part size
 )
 
 // Global HTTP client with proper timeouts and connection pooling
@@ -676,6 +680,20 @@ func (dl *download) Fetch() error {
 
 	// Single-threaded download
 	if dl.boost == 1 || !dl.supportsRange {
+		// Calculate timeout for entire file
+		downloadSize := dl.filesize
+		if dl.resume && existingSize > 0 {
+			downloadSize = dl.filesize - uint64(existingSize)
+		}
+		downloadSizeMB := downloadSize / (1024 * 1024)
+		timeout := minDownloadTimeout + (time.Duration(downloadSizeMB) * timeoutPerMB)
+		
+		// Create a custom HTTP client with appropriate timeout
+		singleClient := &http.Client{
+			Timeout: timeout,
+			Transport: httpClient.Transport,
+		}
+		
 		// Single-stream download
 		req, err := http.NewRequestWithContext(dl.ctx, "GET", dl.uri, nil)
 		if err != nil {
@@ -691,7 +709,7 @@ func (dl *download) Fetch() error {
 			bar.Set64(existingSize) // Update progress bar
 		}
 
-		resp, err := httpClient.Do(req)
+		resp, err := singleClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("single-stream download failed: %w", err)
 		}
@@ -855,6 +873,17 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 		}
 	}
 
+	// Calculate dynamic timeout based on part size
+	partSize := p.endByte - startByte + 1
+	partSizeMB := partSize / (1024 * 1024)
+	timeout := minDownloadTimeout + (time.Duration(partSizeMB) * timeoutPerMB)
+	
+	// Create a custom HTTP client with appropriate timeout for this part
+	partClient := &http.Client{
+		Timeout: timeout,
+		Transport: httpClient.Transport, // Reuse the transport for connection pooling
+	}
+
 	byteRange := fmt.Sprintf("bytes=%d-%d", startByte, p.endByte)
 	req, err := http.NewRequestWithContext(dl.ctx, "GET", p.uri, nil)
 	if err != nil {
@@ -863,7 +892,7 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 	req.Header.Set("Range", byteRange)
 	req.Header.Set("User-Agent", "dl/1.1.1")
 
-	resp, err := httpClient.Do(req)
+	resp, err := partClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download part %d: %w", p.index, err)
 	}
