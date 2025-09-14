@@ -645,16 +645,37 @@ func preallocateFile(file *os.File, size int64) error {
 		const F_ALLOCATECONTIG = 0x00000002
 		const F_PEOFPOSMODE = 3
 		
-		// Create fstore structure manually (compatible with C struct)
-		// struct fstore { u_int32_t fst_flags; int fst_posmode; off_t fst_offset; off_t fst_length; off_t fst_bytesalloc; }
-		store := [5]int64{F_ALLOCATECONTIG, F_PEOFPOSMODE, 0, size, 0}
+		// C struct fstore layout on macOS:
+		// struct fstore {
+		//     u_int32_t fst_flags;      /* IN: flags word */
+		//     int fst_posmode;          /* IN: indicates offset field */
+		//     off_t fst_offset;         /* IN: start of the region */
+		//     off_t fst_length;         /* IN: size of the region */
+		//     off_t fst_bytesalloc;     /* OUT: number of bytes allocated */
+		// };
+		// On 64-bit macOS: u_int32_t=4bytes, int=4bytes, off_t=8bytes
+		type fstore struct {
+			flags      uint32
+			posmode    int32
+			offset     int64
+			length     int64
+			bytesalloc int64
+		}
+		
+		store := fstore{
+			flags:      F_ALLOCATECONTIG,
+			posmode:    F_PEOFPOSMODE,
+			offset:     0,
+			length:     size,
+			bytesalloc: 0,
+		}
 		
 		// Try contiguous allocation first
-		_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), F_PREALLOCATE, uintptr(unsafe.Pointer(&store[0])))
+		_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), F_PREALLOCATE, uintptr(unsafe.Pointer(&store)))
 		if errno != 0 {
 			// Fall back to non-contiguous allocation
-			store[0] = 0 // No flags = non-contiguous is OK
-			_, _, errno = syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), F_PREALLOCATE, uintptr(unsafe.Pointer(&store[0])))
+			store.flags = 0 // No flags = non-contiguous is OK
+			_, _, errno = syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), F_PREALLOCATE, uintptr(unsafe.Pointer(&store)))
 			if errno != 0 {
 				return fmt.Errorf("fcntl F_PREALLOCATE failed: %v", errno)
 			}
