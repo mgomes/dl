@@ -7,7 +7,8 @@ A fast, reliable download manager that utilizes concurrent connections to maximi
 - **Concurrent downloading** - Multiple connections for faster downloads
 - **Auto-resume by default** - Automatically continues interrupted downloads
 - **Progress persistence** - Tracks exact download state across restarts
-- **Sparse file support** - Efficient disk usage on macOS/Linux
+- **Disk space preallocation** - True preallocation on Linux/macOS for better performance
+- **Configurable buffer sizes** - Optimize for different storage types (8KB-512KB)
 - **Bandwidth limiting** - Control download speed
 - **Checksum verification** - Verify file integrity (MD5/SHA256)
 - **Smart retry logic** - Exponential backoff for failed parts
@@ -51,6 +52,7 @@ Options:
   -resume             Resume interrupted download (default: true)
   -no-resume          Disable auto-resume functionality
   -limit string       Bandwidth limit (e.g. 1M, 500K, 100KB/s)
+  -buffer string      Buffer size: 8KB, 16KB, 32KB, 64KB, 256KB, 512KB (default: 16KB)
   -checksum string    Verify with checksum (format: algorithm:hash)
 ```
 
@@ -78,8 +80,14 @@ dl -checksum sha256:abc123... https://example.com/file.zip
 # Use 4 connections with 5 retries
 dl -boost 4 -retries 5 https://example.com/file.zip
 
+# Use larger buffer for better performance on fast storage
+dl -buffer 256KB https://example.com/file.zip
+
+# Optimize for spinning disks (larger buffer, fewer connections)
+dl -buffer 512KB -boost 4 https://example.com/large-file.zip
+
 # Combine multiple options
-dl -boost 4 -limit 500K -filename data.tar.gz https://example.com/file.tar.gz
+dl -boost 4 -limit 500K -buffer 64KB -filename data.tar.gz https://example.com/file.tar.gz
 ```
 
 ## Configuration File
@@ -90,13 +98,32 @@ Create a `.dlrc` file in your home directory to set default values:
 # ~/.dlrc
 boost = 8
 retries = 3
+buffer_size = 256KB
 ```
 
 ## Advanced Features
 
-### Concurrent Downloads
+### Performance Optimization
 
-The `-boost` parameter controls how many simultaneous connections are used. Higher values aren't always better - your network throughput will eventually saturate. The default of 8 works well for most scenarios.
+#### Buffer Size Selection
+Choose buffer size based on your storage type:
+- **SSDs/NVMe**: 256KB or 512KB for maximum throughput
+- **Spinning disks**: 512KB with lower `-boost` values (2-4 connections)
+- **Network storage**: 64KB-256KB depending on latency
+- **Default**: 16KB balances memory usage and performance
+
+#### Concurrent Downloads
+The `-boost` parameter controls how many simultaneous connections are used. Higher values aren't always better:
+- **SSDs**: 8-16 connections work well
+- **Spinning disks**: 2-4 connections to reduce seeking
+- **Network bottleneck**: Match your bandwidth capacity
+
+#### Disk Space Preallocation
+On Linux and macOS, `dl` automatically preallocates disk space for multi-part downloads:
+- **Linux**: Uses `fallocate()` for true space allocation
+- **macOS**: Uses `fcntl(F_PREALLOCATE)` with contiguous allocation preference
+- **Benefits**: Reduces fragmentation, eliminates allocation overhead during download
+- **Fallback**: Automatically falls back to sparse files on unsupported systems
 
 ### Auto-Resume Capability
 
@@ -116,7 +143,6 @@ Features:
 - **Automatic detection** - Finds incomplete downloads and resumes automatically
 - **Progress persistence** - Saves exact download state in `.filename.dl_progress` files
 - **Multi-part awareness** - Resumes each parallel connection from exact byte position
-- **Sparse file support** - Efficient disk usage on macOS/Linux filesystems
 - **Smart validation** - Verifies same URL/filesize before resuming
 - **Clean completion** - Removes progress files after successful download
 

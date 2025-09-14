@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/time/rate"
@@ -61,7 +62,7 @@ func (rl *rateLimitedWriter) Write(p []byte) (int, error) {
 	// Write in chunks to avoid blocking for too long
 	written := 0
 	for written < len(p) {
-		chunkSize := 16 * 1024 // 16KB chunks
+		chunkSize := 16 * 1024 // 16KB chunks (this is for rate limiting, separate from download buffer)
 		if chunkSize > len(p)-written {
 			chunkSize = len(p) - written
 		}
@@ -96,6 +97,7 @@ type download struct {
 	retries        int
 	resume         bool
 	bandwidthLimit int64 // bytes per second, 0 = unlimited
+	bufferSize     int   // buffer size in bytes
 	parts          []downloadPart
 	supportsRange  bool
 	ctx            context.Context
@@ -126,8 +128,9 @@ type PartProgress struct {
 }
 
 type config struct {
-	boost    int
-	retries  int
+	boost      int
+	retries    int
+	bufferSize int
 }
 
 const (
@@ -159,8 +162,9 @@ var httpClient = &http.Client{
 
 func loadConfig() config {
 	cfg := config{
-		boost:   8,
-		retries: 3,
+		boost:      8,
+		retries:    3,
+		bufferSize: 16 * 1024, // 16KB default
 	}
 	
 	// Try to load from user's home directory
@@ -200,10 +204,70 @@ func loadConfig() config {
 			if v, err := strconv.Atoi(value); err == nil && v > 0 {
 				cfg.retries = v
 			}
+		case "buffer_size":
+			if size, err := parseBufferSize(value); err == nil {
+				cfg.bufferSize = size
+			}
 		}
 	}
 	
 	return cfg
+}
+
+// parseBufferSize parses buffer size strings like "16KB", "256KB", "1MB"
+func parseBufferSize(size string) (int, error) {
+	if size == "" {
+		return 0, fmt.Errorf("empty buffer size")
+	}
+	
+	// Normalize to uppercase
+	size = strings.ToUpper(strings.TrimSpace(size))
+	
+	// Extract numeric part and unit
+	var numStr string
+	var unit string
+	for i, ch := range size {
+		if ch >= '0' && ch <= '9' || ch == '.' {
+			continue
+		}
+		numStr = size[:i]
+		unit = size[i:]
+		break
+	}
+	
+	if numStr == "" {
+		numStr = size
+	}
+	
+	num, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid buffer size: %s", size)
+	}
+	
+	// Convert to bytes
+	multiplier := float64(1)
+	switch strings.ToUpper(strings.TrimSpace(unit)) {
+	case "MB":
+		multiplier = 1024 * 1024
+	case "KB", "K":
+		multiplier = 1024
+	case "B", "":
+		multiplier = 1
+	default:
+		return 0, fmt.Errorf("unknown unit: %s (supported: B, KB, MB)", unit)
+	}
+	
+	result := int(num * multiplier)
+	
+	// Validate against allowed sizes
+	allowedSizes := []int{8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 256 * 1024, 512 * 1024}
+	for _, allowed := range allowedSizes {
+		if result == allowed {
+			return result, nil
+		}
+	}
+	
+	return 0, fmt.Errorf("buffer size must be one of: 8KB, 16KB, 32KB, 64KB, 256KB, 512KB")
 }
 
 // parseBandwidthLimit parses bandwidth limit strings like "1M", "500K", "100KB/s"
@@ -265,6 +329,7 @@ func main() {
 	resumePtr := flag.Bool("resume", true, "resume interrupted download (default: true)")
 	noResumePtr := flag.Bool("no-resume", false, "disable auto-resume")
 	limitPtr := flag.String("limit", "", "bandwidth limit (e.g. 1M, 500K, 100KB/s)")
+	bufferPtr := flag.String("buffer", "", "buffer size (8KB, 16KB, 32KB, 64KB, 256KB, 512KB)")
 	checksumPtr := flag.String("checksum", "", "verify download with checksum (format: algorithm:hash, e.g. sha256:abc123...)")
 	
 	flag.Parse()
@@ -279,6 +344,15 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing bandwidth limit: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Parse buffer size
+	bufferSize := cfg.bufferSize // Use config default
+	if *bufferPtr != "" {
+		if bufferSize, err = parseBufferSize(*bufferPtr); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing buffer size: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	fileURIs := flag.Args()
@@ -307,6 +381,7 @@ func main() {
 		dl.retries = *retriesPtr
 		dl.resume = *resumePtr && !*noResumePtr // Resume by default unless --no-resume is used
 		dl.bandwidthLimit = bandwidthLimit
+		dl.bufferSize = bufferSize
 		dl.ctx = ctx
 
 		// Fetch file metadata
@@ -549,7 +624,49 @@ func supportsSparseFiles(path string) bool {
 	}
 }
 
-// createSparseFile creates a sparse file of the given size
+// preallocateFile attempts to preallocate disk space for the file
+func preallocateFile(file *os.File, size int64) error {
+	switch runtime.GOOS {
+	case "linux":
+		// Use fallocate() syscall on Linux (syscall number 285 on x86_64)
+		fd := int(file.Fd())
+		const SYS_FALLOCATE = 285
+		_, _, errno := syscall.Syscall6(SYS_FALLOCATE, uintptr(fd), 0, 0, uintptr(size), 0, 0)
+		if errno != 0 {
+			return fmt.Errorf("fallocate failed: %v", errno)
+		}
+		return nil
+	case "darwin":
+		// Use fcntl with F_PREALLOCATE on macOS for true preallocation
+		fd := int(file.Fd())
+		
+		// F_PREALLOCATE = 42, F_ALLOCATECONTIG = 0x00000002, F_PEOFPOSMODE = 3
+		const F_PREALLOCATE = 42
+		const F_ALLOCATECONTIG = 0x00000002
+		const F_PEOFPOSMODE = 3
+		
+		// Create fstore structure manually (compatible with C struct)
+		// struct fstore { u_int32_t fst_flags; int fst_posmode; off_t fst_offset; off_t fst_length; off_t fst_bytesalloc; }
+		store := [5]int64{F_ALLOCATECONTIG, F_PEOFPOSMODE, 0, size, 0}
+		
+		// Try contiguous allocation first
+		_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), F_PREALLOCATE, uintptr(unsafe.Pointer(&store[0])))
+		if errno != 0 {
+			// Fall back to non-contiguous allocation
+			store[0] = 0 // No flags = non-contiguous is OK
+			_, _, errno = syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), F_PREALLOCATE, uintptr(unsafe.Pointer(&store[0])))
+			if errno != 0 {
+				return fmt.Errorf("fcntl F_PREALLOCATE failed: %v", errno)
+			}
+		}
+		return nil
+	default:
+		// Fall back to sparse file creation for other systems
+		return createSparseFile(file, size)
+	}
+}
+
+// createSparseFile creates a sparse file of the given size (fallback method)
 func createSparseFile(file *os.File, size int64) error {
 	// On Unix-like systems, seeking past EOF and writing creates a sparse file
 	if _, err := file.Seek(size-1, 0); err != nil {
@@ -640,17 +757,10 @@ func (dl *download) Fetch() error {
 	
 	// Set up the file size
 	if dl.boost > 1 && dl.supportsRange && !dl.resume {
-		// Use sparse file if supported
-		if supportsSparseFiles(dl.workingDir) {
-			if err := createSparseFile(outFile, int64(dl.filesize)); err != nil {
-				// Fall back to truncate if sparse file creation fails
-				fmt.Printf("Warning: sparse file creation failed, using regular allocation: %v\n", err)
-				if err = outFile.Truncate(int64(dl.filesize)); err != nil {
-					return fmt.Errorf("error setting file size: %w", err)
-				}
-			}
-		} else {
-			// Traditional pre-allocation
+		// Try to preallocate disk space for better performance
+		if err := preallocateFile(outFile, int64(dl.filesize)); err != nil {
+			// Fall back to truncate if preallocation fails
+			fmt.Printf("Warning: preallocation failed, using regular allocation: %v\n", err)
 			if err = outFile.Truncate(int64(dl.filesize)); err != nil {
 				return fmt.Errorf("error setting file size: %w", err)
 			}
@@ -737,7 +847,7 @@ func (dl *download) Fetch() error {
 			writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.ctx}
 		}
 		
-		_, err = io.Copy(writer, resp.Body)
+		_, err = copyWithBuffer(writer, resp.Body, dl.bufferSize)
 		if err != nil {
 			return err
 		}
@@ -949,7 +1059,7 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 		writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.ctx}
 	}
 	
-	if _, copyErr := io.Copy(writer, resp.Body); copyErr != nil {
+	if _, copyErr := copyWithBuffer(writer, resp.Body, dl.bufferSize); copyErr != nil {
 		return fmt.Errorf("error writing part %d: %w", p.index, copyErr)
 	}
 	
@@ -964,6 +1074,12 @@ type WriterFunc func([]byte) (int, error)
 
 func (f WriterFunc) Write(p []byte) (int, error) {
 	return f(p)
+}
+
+// copyWithBuffer copies from src to dst using the specified buffer size
+func copyWithBuffer(dst io.Writer, src io.Reader, bufferSize int) (int64, error) {
+	buf := make([]byte, bufferSize)
+	return io.CopyBuffer(dst, src, buf)
 }
 
 // calculatePartBoundary calculates the start and end bytes for a part index.
