@@ -87,6 +87,13 @@ type downloadPart struct {
 	endByte   uint64
 }
 
+// atomicCounter is padded to 64 bytes to prevent false sharing between CPU cores.
+// Without padding, adjacent counters share a cache line, causing cache thrashing.
+type atomicCounter struct {
+	val uint64
+	_   [56]byte // pad to 64 bytes (cache line size)
+}
+
 type download struct {
 	uri            string
 	filesize       uint64
@@ -101,7 +108,7 @@ type download struct {
 	ctx            context.Context
 	progress       *DownloadProgress
 	progressMutex  sync.Mutex
-	partDownloaded []uint64 // atomic counters for bytes downloaded per part (no mutex needed)
+	partDownloaded []atomicCounter // cache-line padded atomic counters for lock-free progress
 }
 
 // DownloadProgress tracks the progress of a download
@@ -456,7 +463,7 @@ func (dl *download) saveProgress() error {
 	// Sync from atomic counters to progress struct (lock-free reads)
 	for i := range dl.partDownloaded {
 		if partProgress, ok := dl.progress.Parts[i]; ok {
-			partProgress.Downloaded = atomic.LoadUint64(&dl.partDownloaded[i])
+			partProgress.Downloaded = atomic.LoadUint64(&dl.partDownloaded[i].val)
 			partProgress.LastModified = time.Now()
 		}
 	}
@@ -587,7 +594,7 @@ func (dl *download) Fetch() error {
 	// Prepare chunk boundaries first (needed for progress tracking)
 	if dl.boost > 1 && dl.supportsRange {
 		dl.parts = make([]downloadPart, dl.boost)
-		dl.partDownloaded = make([]uint64, dl.boost) // atomic counters for lock-free progress tracking
+		dl.partDownloaded = make([]atomicCounter, dl.boost) // cache-line padded counters for lock-free progress
 		for i := 0; i < dl.boost; i++ {
 			start, end := dl.calculatePartBoundary(i)
 			dl.parts[i] = downloadPart{
@@ -680,7 +687,7 @@ func (dl *download) Fetch() error {
 	if resumeFromProgress && dl.progress != nil {
 		for i := range dl.parts {
 			if partProgress, ok := dl.progress.Parts[i]; ok {
-				atomic.StoreUint64(&dl.partDownloaded[i], partProgress.Downloaded)
+				atomic.StoreUint64(&dl.partDownloaded[i].val, partProgress.Downloaded)
 			}
 		}
 	}
@@ -799,6 +806,37 @@ func (dl *download) Fetch() error {
 		}
 	}()
 
+	// UI update ticker - updates progress bar without mutex contention in download loop
+	go func() {
+		uiTicker := time.NewTicker(100 * time.Millisecond)
+		defer uiTicker.Stop()
+
+		var lastTotal uint64
+		for {
+			select {
+			case <-ctx.Done():
+				// Final update to ensure bar reaches 100%
+				var finalTotal uint64
+				for i := range dl.partDownloaded {
+					finalTotal += atomic.LoadUint64(&dl.partDownloaded[i].val)
+				}
+				if diff := finalTotal - lastTotal; diff > 0 {
+					bar.Add64(int64(diff))
+				}
+				return
+			case <-uiTicker.C:
+				var currentTotal uint64
+				for i := range dl.partDownloaded {
+					currentTotal += atomic.LoadUint64(&dl.partDownloaded[i].val)
+				}
+				if diff := currentTotal - lastTotal; diff > 0 {
+					bar.Add64(int64(diff))
+					lastTotal = currentTotal
+				}
+			}
+		}
+	}()
+
 	// Launch goroutines
 	for _, part := range dl.parts {
 		// Skip completed parts when resuming
@@ -810,7 +848,7 @@ func (dl *download) Fetch() error {
 		wg.Add(1)
 		go func(dp downloadPart) {
 			defer wg.Done()
-			if err := dl.fetchPartRange(dp, outFile, bar); err != nil {
+			if err := dl.fetchPartRange(dp, outFile); err != nil {
 				errCh <- err
 			}
 		}(part)
@@ -850,12 +888,12 @@ func (dl *download) Fetch() error {
 	return nil
 }
 
-func (dl *download) fetchPartRange(p downloadPart, outFile *os.File, bar *progressbar.ProgressBar) error {
+func (dl *download) fetchPartRange(p downloadPart, outFile *os.File) error {
 	var lastErr error
 	baseDelay := 1 * time.Second
 
 	for i := 0; i < dl.retries; i++ {
-		err := dl.fetchPartOnce(p, outFile, bar)
+		err := dl.fetchPartOnce(p, outFile)
 		if err == nil {
 			return nil
 		}
@@ -872,7 +910,7 @@ func (dl *download) fetchPartRange(p downloadPart, outFile *os.File, bar *progre
 	return fmt.Errorf("part %d failed after %d retries: %w", p.index, dl.retries, lastErr)
 }
 
-func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progressbar.ProgressBar) error {
+func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File) error {
 	// Check if we need to resume this part
 	startByte := p.startByte
 	alreadyDownloaded := uint64(0)
@@ -927,14 +965,13 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 	writeOffset := int64(startByte)
 	partIndex := p.index
 
-	// Custom Write method that updates progress via atomic counter (no mutex)
+	// Custom Write method that updates progress via atomic counter (no mutex, no locks)
+	// Progress bar is updated by a separate ticker goroutine, not here
 	trackerWriter := func(data []byte) (int, error) {
 		n, err := outFile.WriteAt(data, writeOffset)
 		if n > 0 {
 			writeOffset += int64(n)
-			// Update atomic counter - no mutex needed, synced to progress struct periodically
-			atomic.AddUint64(&dl.partDownloaded[partIndex], uint64(n))
-			bar.Add(n)
+			atomic.AddUint64(&dl.partDownloaded[partIndex].val, uint64(n))
 		}
 		return n, err
 	}
@@ -951,12 +988,14 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 		writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.ctx}
 	}
 
-	if _, copyErr := io.Copy(writer, resp.Body); copyErr != nil {
+	// Use 64KB buffer to reduce syscall overhead (default is 32KB)
+	buf := make([]byte, 64*1024)
+	if _, copyErr := io.CopyBuffer(writer, resp.Body, buf); copyErr != nil {
 		return fmt.Errorf("error writing part %d: %w", p.index, copyErr)
 	}
 
 	// Mark part as completed (this one mutex call per part is fine)
-	dl.updatePartProgress(p.index, atomic.LoadUint64(&dl.partDownloaded[p.index]), true)
+	dl.updatePartProgress(p.index, atomic.LoadUint64(&dl.partDownloaded[p.index].val), true)
 
 	return nil
 }
