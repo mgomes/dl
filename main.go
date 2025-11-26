@@ -988,8 +988,8 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File) error {
 		writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.ctx}
 	}
 
-	// Use 64KB buffer to reduce syscall overhead (default is 32KB)
-	buf := make([]byte, 64*1024)
+	// Use 1MB buffer to reduce syscall overhead
+	buf := make([]byte, 1024*1024)
 	if _, copyErr := io.CopyBuffer(writer, resp.Body, buf); copyErr != nil {
 		return fmt.Errorf("error writing part %d: %w", p.index, copyErr)
 	}
