@@ -101,6 +101,7 @@ type download struct {
 	ctx            context.Context
 	progress       *DownloadProgress
 	progressMutex  sync.Mutex
+	partDownloaded []uint64 // atomic counters for bytes downloaded per part (no mutex needed)
 }
 
 // DownloadProgress tracks the progress of a download
@@ -452,6 +453,14 @@ func (dl *download) saveProgress() error {
 		return nil
 	}
 
+	// Sync from atomic counters to progress struct (lock-free reads)
+	for i := range dl.partDownloaded {
+		if partProgress, ok := dl.progress.Parts[i]; ok {
+			partProgress.Downloaded = atomic.LoadUint64(&dl.partDownloaded[i])
+			partProgress.LastModified = time.Now()
+		}
+	}
+
 	dl.progress.LastUpdated = time.Now()
 
 	data, err := json.MarshalIndent(dl.progress, "", "  ")
@@ -578,6 +587,7 @@ func (dl *download) Fetch() error {
 	// Prepare chunk boundaries first (needed for progress tracking)
 	if dl.boost > 1 && dl.supportsRange {
 		dl.parts = make([]downloadPart, dl.boost)
+		dl.partDownloaded = make([]uint64, dl.boost) // atomic counters for lock-free progress tracking
 		for i := 0; i < dl.boost; i++ {
 			start, end := dl.calculatePartBoundary(i)
 			dl.parts[i] = downloadPart{
@@ -663,6 +673,15 @@ func (dl *download) Fetch() error {
 		dl.initProgress()
 		if err := dl.saveProgress(); err != nil {
 			fmt.Printf("Warning: could not save initial progress: %v\n", err)
+		}
+	}
+
+	// Initialize atomic counters from existing progress (for resume)
+	if resumeFromProgress && dl.progress != nil {
+		for i := range dl.parts {
+			if partProgress, ok := dl.progress.Parts[i]; ok {
+				atomic.StoreUint64(&dl.partDownloaded[i], partProgress.Downloaded)
+			}
 		}
 	}
 
@@ -904,36 +923,18 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 			resp.StatusCode, resp.Status, p.index, startByte, p.endByte)
 	}
 
-	// Create a custom writer that tracks progress
-	type progressTracker struct {
-		w          io.WriterAt
-		offset     int64
-		index      int
-		downloaded *uint64
-		dl         *download
-		bar        *progressbar.ProgressBar
-	}
+	// Track write offset for this part
+	writeOffset := int64(startByte)
+	partIndex := p.index
 
-	downloaded := alreadyDownloaded
-	tracker := &progressTracker{
-		w:          outFile,
-		offset:     int64(startByte),
-		index:      p.index,
-		downloaded: &downloaded,
-		dl:         dl,
-		bar:        bar,
-	}
-
-	// Custom Write method that updates progress
-	trackerWriter := func(p []byte) (int, error) {
-		n, err := tracker.w.WriteAt(p, tracker.offset)
+	// Custom Write method that updates progress via atomic counter (no mutex)
+	trackerWriter := func(data []byte) (int, error) {
+		n, err := outFile.WriteAt(data, writeOffset)
 		if n > 0 {
-			tracker.offset += int64(n)
-			atomic.AddUint64(tracker.downloaded, uint64(n))
-			// Update progress tracking
-			tracker.dl.updatePartProgress(tracker.index, atomic.LoadUint64(tracker.downloaded), false)
-			// Update progress bar
-			tracker.bar.Add(n)
+			writeOffset += int64(n)
+			// Update atomic counter - no mutex needed, synced to progress struct periodically
+			atomic.AddUint64(&dl.partDownloaded[partIndex], uint64(n))
+			bar.Add(n)
 		}
 		return n, err
 	}
@@ -954,8 +955,8 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File, bar *progres
 		return fmt.Errorf("error writing part %d: %w", p.index, copyErr)
 	}
 
-	// Mark part as completed
-	dl.updatePartProgress(p.index, atomic.LoadUint64(&downloaded), true)
+	// Mark part as completed (this one mutex call per part is fine)
+	dl.updatePartProgress(p.index, atomic.LoadUint64(&dl.partDownloaded[p.index]), true)
 
 	return nil
 }
