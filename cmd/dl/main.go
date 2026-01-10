@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/mgomes/dl"
 )
 
 func main() {
@@ -52,21 +54,22 @@ func main() {
 	}()
 
 	for _, uri := range fileURIs {
-		var dl download
-		dl.uri = uri
-		dl.boost = *boostPtr
-		dl.retries = *retriesPtr
-		dl.resume = *resumePtr && !*noResumePtr
-		dl.bandwidthLimit = bandwidthLimit
-		dl.ctx = ctx
+		downloader := dl.Downloader{
+			URI:            uri,
+			Boost:          *boostPtr,
+			Retries:        *retriesPtr,
+			Resume:         *resumePtr && !*noResumePtr,
+			BandwidthLimit: bandwidthLimit,
+			Context:        ctx,
+		}
 
-		if err := dl.FetchMetadata(); err != nil {
+		if err := downloader.FetchMetadata(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching metadata for %s: %v\n", uri, err)
 			os.Exit(1)
 		}
 
 		if *filenamePtr != "" {
-			dl.filename = *filenamePtr
+			downloader.Filename = *filenamePtr
 		}
 
 		wd, err := os.Getwd()
@@ -74,32 +77,31 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error getting working directory: %v\n", err)
 			os.Exit(1)
 		}
-		dl.workingDir = wd
+		downloader.WorkingDir = wd
 
-		fmt.Println("Downloading:", dl.filename)
+		fmt.Println("Downloading:", downloader.Filename)
 
-		if !dl.supportsRange && dl.boost > 1 {
+		if !downloader.SupportsRange() && downloader.Boost > 1 {
 			fmt.Println("Server does not support partial content. Falling back to single-threaded download.")
-			dl.boost = 1
+			downloader.Boost = 1
 		}
 
-		if err := dl.Fetch(); err != nil {
+		downloader.Progress = newProgressBarReporter(downloader.FileSize())
+
+		if err := downloader.Fetch(); err != nil {
 			if errors.Is(err, context.Canceled) {
 				fmt.Println("\nDownload cancelled")
 				os.Exit(1)
 			}
 			fmt.Fprintf(os.Stderr, "Error while downloading: %v\n", err)
-			if dl.progress == nil {
-				_ = os.Remove(dl.outputPath())
-			}
 			os.Exit(1)
 		}
 
-		fmt.Println("Download completed:", dl.filename)
+		fmt.Println("Download completed:", downloader.Filename)
 
 		if *checksumPtr != "" {
 			fmt.Printf("Verifying checksum...")
-			if err := verifyChecksum(dl.outputPath(), *checksumPtr); err != nil {
+			if err := verifyChecksum(downloader.OutputPath(), *checksumPtr); err != nil {
 				fmt.Fprintf(os.Stderr, "\nChecksum verification failed: %v\n", err)
 				os.Exit(1)
 			}

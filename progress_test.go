@@ -1,4 +1,4 @@
-package main
+package dl
 
 import (
 	"os"
@@ -7,9 +7,9 @@ import (
 )
 
 func TestProgressFilePath(t *testing.T) {
-	dl := download{
-		workingDir: "/tmp",
-		filename:   "test.zip",
+	dl := Downloader{
+		WorkingDir: "/tmp",
+		Filename:   "test.zip",
 	}
 
 	expected := "/tmp/.test.zip.dl_progress"
@@ -20,11 +20,11 @@ func TestProgressFilePath(t *testing.T) {
 }
 
 func TestInitProgress(t *testing.T) {
-	dl := download{
-		uri:      "http://example.com/file.zip",
-		filesize: 1000,
-		filename: "file.zip",
-		boost:    4,
+	dl := Downloader{
+		URI:      "http://example.com/file.zip",
+		fileSize: 1000,
+		Filename: "file.zip",
+		Boost:    4,
 		parts: []downloadPart{
 			{index: 0, startByte: 0, endByte: 249},
 			{index: 1, startByte: 250, endByte: 499},
@@ -38,11 +38,11 @@ func TestInitProgress(t *testing.T) {
 	if dl.progress == nil {
 		t.Fatal("progress should not be nil")
 	}
-	if dl.progress.URI != dl.uri {
-		t.Errorf("expected URI %s, got %s", dl.uri, dl.progress.URI)
+	if dl.progress.URI != dl.URI {
+		t.Errorf("expected URI %s, got %s", dl.URI, dl.progress.URI)
 	}
-	if dl.progress.FileSize != dl.filesize {
-		t.Errorf("expected filesize %d, got %d", dl.filesize, dl.progress.FileSize)
+	if dl.progress.FileSize != dl.fileSize {
+		t.Errorf("expected filesize %d, got %d", dl.fileSize, dl.progress.FileSize)
 	}
 	if len(dl.progress.Parts) != 4 {
 		t.Errorf("expected 4 parts, got %d", len(dl.progress.Parts))
@@ -69,12 +69,12 @@ func TestSaveAndLoadProgress(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dl := download{
-		uri:            "http://example.com/file.zip",
-		filesize:       1000,
-		filename:       "file.zip",
-		workingDir:     tmpDir,
-		boost:          2,
+	dl := Downloader{
+		URI:            "http://example.com/file.zip",
+		fileSize:       1000,
+		Filename:       "file.zip",
+		WorkingDir:     tmpDir,
+		Boost:          2,
 		partDownloaded: make([]atomicCounter, 2),
 		parts: []downloadPart{
 			{index: 0, startByte: 0, endByte: 499},
@@ -95,11 +95,11 @@ func TestSaveAndLoadProgress(t *testing.T) {
 		t.Error("progress file was not created")
 	}
 
-	dl2 := download{
-		uri:        "http://example.com/file.zip",
-		filesize:   1000,
-		filename:   "file.zip",
-		workingDir: tmpDir,
+	dl2 := Downloader{
+		URI:        "http://example.com/file.zip",
+		fileSize:   1000,
+		Filename:   "file.zip",
+		WorkingDir: tmpDir,
 	}
 
 	if err := dl2.loadProgress(); err != nil {
@@ -124,12 +124,12 @@ func TestLoadProgressMismatch(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dl := download{
-		uri:            "http://example.com/file.zip",
-		filesize:       1000,
-		filename:       "file.zip",
-		workingDir:     tmpDir,
-		boost:          1,
+	dl := Downloader{
+		URI:            "http://example.com/file.zip",
+		fileSize:       1000,
+		Filename:       "file.zip",
+		WorkingDir:     tmpDir,
+		Boost:          1,
 		partDownloaded: make([]atomicCounter, 1),
 		parts: []downloadPart{
 			{index: 0, startByte: 0, endByte: 999},
@@ -138,11 +138,11 @@ func TestLoadProgressMismatch(t *testing.T) {
 	dl.initProgress()
 	dl.saveProgress()
 
-	dl2 := download{
-		uri:        "http://example.com/different.zip",
-		filesize:   1000,
-		filename:   "file.zip",
-		workingDir: tmpDir,
+	dl2 := Downloader{
+		URI:        "http://example.com/different.zip",
+		fileSize:   1000,
+		Filename:   "file.zip",
+		WorkingDir: tmpDir,
 	}
 
 	if err := dl2.loadProgress(); err != nil {
@@ -161,11 +161,11 @@ func TestLoadProgressNoFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dl := download{
-		uri:        "http://example.com/file.zip",
-		filesize:   1000,
-		filename:   "file.zip",
-		workingDir: tmpDir,
+	dl := Downloader{
+		URI:        "http://example.com/file.zip",
+		fileSize:   1000,
+		Filename:   "file.zip",
+		WorkingDir: tmpDir,
 	}
 
 	if err := dl.loadProgress(); err != nil {
@@ -184,12 +184,12 @@ func TestRemoveProgress(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dl := download{
-		uri:            "http://example.com/file.zip",
-		filesize:       1000,
-		filename:       "file.zip",
-		workingDir:     tmpDir,
-		boost:          1,
+	dl := Downloader{
+		URI:            "http://example.com/file.zip",
+		fileSize:       1000,
+		Filename:       "file.zip",
+		WorkingDir:     tmpDir,
+		Boost:          1,
 		partDownloaded: make([]atomicCounter, 1),
 		parts: []downloadPart{
 			{index: 0, startByte: 0, endByte: 999},
@@ -213,11 +213,11 @@ func TestRemoveProgress(t *testing.T) {
 }
 
 func TestUpdatePartProgress(t *testing.T) {
-	dl := download{
-		uri:      "http://example.com/file.zip",
-		filesize: 1000,
-		filename: "file.zip",
-		boost:    2,
+	dl := Downloader{
+		URI:      "http://example.com/file.zip",
+		fileSize: 1000,
+		Filename: "file.zip",
+		Boost:    2,
 		parts: []downloadPart{
 			{index: 0, startByte: 0, endByte: 499},
 			{index: 1, startByte: 500, endByte: 999},
@@ -243,11 +243,11 @@ func TestUpdatePartProgress(t *testing.T) {
 }
 
 func TestGetTotalDownloaded(t *testing.T) {
-	dl := download{
-		uri:      "http://example.com/file.zip",
-		filesize: 1000,
-		filename: "file.zip",
-		boost:    4,
+	dl := Downloader{
+		URI:      "http://example.com/file.zip",
+		fileSize: 1000,
+		Filename: "file.zip",
+		Boost:    4,
 		parts: []downloadPart{
 			{index: 0, startByte: 0, endByte: 249},
 			{index: 1, startByte: 250, endByte: 499},
@@ -269,7 +269,7 @@ func TestGetTotalDownloaded(t *testing.T) {
 }
 
 func TestGetTotalDownloadedNilProgress(t *testing.T) {
-	dl := download{}
+	dl := Downloader{}
 	total := dl.getTotalDownloaded()
 	if total != 0 {
 		t.Errorf("expected total=0 for nil progress, got %d", total)
