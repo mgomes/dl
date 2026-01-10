@@ -1,4 +1,4 @@
-package main
+package dl
 
 import (
 	"context"
@@ -10,9 +10,9 @@ import (
 )
 
 func TestCalculatePartBoundary(t *testing.T) {
-	dl := download{
-		filesize: 1000,
-		boost:    4,
+	dl := Downloader{
+		fileSize: 1000,
+		Boost:    4,
 	}
 
 	tests := []struct {
@@ -38,9 +38,9 @@ func TestCalculatePartBoundary(t *testing.T) {
 }
 
 func TestCalculatePartBoundaryUneven(t *testing.T) {
-	dl := download{
-		filesize: 1000,
-		boost:    3,
+	dl := Downloader{
+		fileSize: 1000,
+		Boost:    3,
 	}
 
 	start0, end0 := dl.calculatePartBoundary(0)
@@ -73,7 +73,7 @@ func TestFilenameFromURI(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.uri, func(t *testing.T) {
-			dl := download{uri: tt.uri}
+			dl := Downloader{URI: tt.uri}
 			result := dl.filenameFromURI()
 			if result != tt.expected {
 				t.Errorf("for URI %s, expected %s but got %s", tt.uri, tt.expected, result)
@@ -83,13 +83,13 @@ func TestFilenameFromURI(t *testing.T) {
 }
 
 func TestOutputPath(t *testing.T) {
-	dl := download{
-		workingDir: "/home/user/downloads",
-		filename:   "test.zip",
+	dl := Downloader{
+		WorkingDir: "/home/user/downloads",
+		Filename:   "test.zip",
 	}
 
 	expected := "/home/user/downloads/test.zip"
-	result := dl.outputPath()
+	result := dl.OutputPath()
 	if result != expected {
 		t.Errorf("expected %s, got %s", expected, result)
 	}
@@ -107,23 +107,23 @@ func TestFetchMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 
-	dl := download{
-		uri: server.URL + "/test",
-		ctx: context.Background(),
+	dl := Downloader{
+		URI:     server.URL + "/test",
+		Context: context.Background(),
 	}
 
 	if err := dl.FetchMetadata(); err != nil {
 		t.Fatalf("FetchMetadata failed: %v", err)
 	}
 
-	if dl.filesize != 12345 {
-		t.Errorf("expected filesize=12345, got %d", dl.filesize)
+	if dl.FileSize() != 12345 {
+		t.Errorf("expected filesize=12345, got %d", dl.FileSize())
 	}
-	if !dl.supportsRange {
+	if !dl.SupportsRange() {
 		t.Error("expected supportsRange=true")
 	}
-	if dl.filename != "test-file.zip" {
-		t.Errorf("expected filename='test-file.zip', got '%s'", dl.filename)
+	if dl.Filename != "test-file.zip" {
+		t.Errorf("expected filename='test-file.zip', got '%s'", dl.Filename)
 	}
 }
 
@@ -134,20 +134,20 @@ func TestFetchMetadataNoRange(t *testing.T) {
 	}))
 	defer server.Close()
 
-	dl := download{
-		uri: server.URL + "/file.zip",
-		ctx: context.Background(),
+	dl := Downloader{
+		URI:     server.URL + "/file.zip",
+		Context: context.Background(),
 	}
 
 	if err := dl.FetchMetadata(); err != nil {
 		t.Fatalf("FetchMetadata failed: %v", err)
 	}
 
-	if dl.supportsRange {
+	if dl.SupportsRange() {
 		t.Error("expected supportsRange=false when Accept-Ranges not set")
 	}
-	if dl.filename != "file.zip" {
-		t.Errorf("expected filename='file.zip', got '%s'", dl.filename)
+	if dl.Filename != "file.zip" {
+		t.Errorf("expected filename='file.zip', got '%s'", dl.Filename)
 	}
 }
 
@@ -157,9 +157,9 @@ func TestFetchMetadataNoContentLength(t *testing.T) {
 	}))
 	defer server.Close()
 
-	dl := download{
-		uri: server.URL + "/test",
-		ctx: context.Background(),
+	dl := Downloader{
+		URI:     server.URL + "/test",
+		Context: context.Background(),
 	}
 
 	err := dl.FetchMetadata()
@@ -174,9 +174,9 @@ func TestFetchMetadataServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	dl := download{
-		uri: server.URL + "/test",
-		ctx: context.Background(),
+	dl := Downloader{
+		URI:     server.URL + "/test",
+		Context: context.Background(),
 	}
 
 	err := dl.FetchMetadata()
@@ -204,11 +204,11 @@ func TestFetchSingleStream(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dl := download{
-		uri:        server.URL + "/test.txt",
-		ctx:        context.Background(),
-		boost:      1,
-		workingDir: tmpDir,
+	dl := Downloader{
+		URI:        server.URL + "/test.txt",
+		Context:    context.Background(),
+		Boost:      1,
+		WorkingDir: tmpDir,
 	}
 
 	if err := dl.FetchMetadata(); err != nil {
@@ -219,7 +219,7 @@ func TestFetchSingleStream(t *testing.T) {
 		t.Fatalf("Fetch failed: %v", err)
 	}
 
-	downloaded, err := os.ReadFile(dl.outputPath())
+	downloaded, err := os.ReadFile(dl.OutputPath())
 	if err != nil {
 		t.Fatalf("failed to read downloaded file: %v", err)
 	}
@@ -263,12 +263,12 @@ func TestFetchMultiPart(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dl := download{
-		uri:        server.URL + "/test.bin",
-		ctx:        context.Background(),
-		boost:      4,
-		retries:    3,
-		workingDir: tmpDir,
+	dl := Downloader{
+		URI:        server.URL + "/test.bin",
+		Context:    context.Background(),
+		Boost:      4,
+		Retries:    3,
+		WorkingDir: tmpDir,
 	}
 
 	if err := dl.FetchMetadata(); err != nil {
@@ -279,7 +279,7 @@ func TestFetchMultiPart(t *testing.T) {
 		t.Fatalf("Fetch failed: %v", err)
 	}
 
-	downloaded, err := os.ReadFile(dl.outputPath())
+	downloaded, err := os.ReadFile(dl.OutputPath())
 	if err != nil {
 		t.Fatalf("failed to read downloaded file: %v", err)
 	}

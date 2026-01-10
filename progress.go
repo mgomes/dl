@@ -1,4 +1,4 @@
-package main
+package dl
 
 import (
 	"encoding/json"
@@ -28,11 +28,11 @@ type PartProgress struct {
 	LastModified time.Time `json:"last_modified"`
 }
 
-func (dl *download) progressFilePath() string {
-	return fmt.Sprintf("%s%c.%s.dl_progress", dl.workingDir, os.PathSeparator, dl.filename)
+func (dl *Downloader) progressFilePath() string {
+	return fmt.Sprintf("%s%c.%s.dl_progress", dl.WorkingDir, os.PathSeparator, dl.Filename)
 }
 
-func (dl *download) loadProgress() error {
+func (dl *Downloader) loadProgress() error {
 	progressPath := dl.progressFilePath()
 	data, err := os.ReadFile(progressPath)
 	if err != nil {
@@ -47,7 +47,7 @@ func (dl *download) loadProgress() error {
 		return fmt.Errorf("failed to parse progress file: %w", err)
 	}
 
-	if progress.URI != dl.uri || progress.FileSize != dl.filesize {
+	if progress.URI != dl.URI || progress.FileSize != dl.fileSize {
 		fmt.Println("Progress file is for a different download, starting fresh")
 		return nil
 	}
@@ -56,7 +56,7 @@ func (dl *download) loadProgress() error {
 	return nil
 }
 
-func (dl *download) saveProgress() error {
+func (dl *Downloader) saveProgress() error {
 	dl.progressMutex.Lock()
 	defer dl.progressMutex.Unlock()
 
@@ -90,16 +90,16 @@ func (dl *download) saveProgress() error {
 	return nil
 }
 
-func (dl *download) removeProgress() error {
+func (dl *Downloader) removeProgress() error {
 	return os.Remove(dl.progressFilePath())
 }
 
-func (dl *download) initProgress() {
+func (dl *Downloader) initProgress() {
 	dl.progress = &DownloadProgress{
 		Version:     1,
-		URI:         dl.uri,
-		FileSize:    dl.filesize,
-		Filename:    dl.filename,
+		URI:         dl.URI,
+		FileSize:    dl.fileSize,
+		Filename:    dl.Filename,
 		Parts:       make(map[int]*PartProgress),
 		Created:     time.Now(),
 		LastUpdated: time.Now(),
@@ -117,7 +117,7 @@ func (dl *download) initProgress() {
 	}
 }
 
-func (dl *download) updatePartProgress(index int, downloaded uint64, completed bool) {
+func (dl *Downloader) updatePartProgress(index int, downloaded uint64, completed bool) {
 	dl.progressMutex.Lock()
 	defer dl.progressMutex.Unlock()
 
@@ -128,7 +128,7 @@ func (dl *download) updatePartProgress(index int, downloaded uint64, completed b
 	}
 }
 
-func (dl *download) getTotalDownloaded() uint64 {
+func (dl *Downloader) getTotalDownloaded() uint64 {
 	dl.progressMutex.Lock()
 	defer dl.progressMutex.Unlock()
 

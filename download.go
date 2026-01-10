@@ -1,4 +1,4 @@
-package main
+package dl
 
 import (
 	"context"
@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/schollz/progressbar/v3"
 	"golang.org/x/time/rate"
 )
 
@@ -52,25 +51,49 @@ type atomicCounter struct {
 	_   [56]byte
 }
 
-type download struct {
-	uri            string
-	filesize       uint64
-	filename       string
-	workingDir     string
-	boost          int
-	retries        int
-	resume         bool
-	bandwidthLimit int64
-	parts          []downloadPart
-	supportsRange  bool
-	ctx            context.Context
-	progress       *DownloadProgress
-	progressMutex  sync.Mutex
-	partDownloaded []atomicCounter
+type Downloader struct {
+	URI            string
+	Filename       string
+	WorkingDir     string
+	Boost          int
+	Retries        int
+	Resume         bool
+	BandwidthLimit int64
+	Progress       ProgressReporter
+	Context        context.Context
+
+	fileSize        uint64
+	supportsRange   bool
+	parts           []downloadPart
+	progress        *DownloadProgress
+	progressMutex   sync.Mutex
+	partDownloaded  []atomicCounter
+	metadataFetched bool
 }
 
-func (dl *download) FetchMetadata() error {
-	req, err := http.NewRequestWithContext(dl.ctx, "HEAD", dl.uri, nil)
+const (
+	DefaultBoost   = 8
+	DefaultRetries = 3
+)
+
+func (dl *Downloader) FileSize() uint64 {
+	return dl.fileSize
+}
+
+func (dl *Downloader) SupportsRange() bool {
+	return dl.supportsRange
+}
+
+func (dl *Downloader) FetchMetadata() error {
+	if dl.URI == "" {
+		return fmt.Errorf("uri is required")
+	}
+
+	if dl.Context == nil {
+		dl.Context = context.Background()
+	}
+
+	req, err := http.NewRequestWithContext(dl.Context, "HEAD", dl.URI, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create HEAD request: %w", err)
 	}
@@ -91,7 +114,7 @@ func (dl *download) FetchMetadata() error {
 		return fmt.Errorf("server did not provide Content-Length header, cannot determine file size")
 	}
 
-	dl.filesize, err = strconv.ParseUint(contentLength, 10, 64)
+	dl.fileSize, err = strconv.ParseUint(contentLength, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid Content-Length '%s': %w", contentLength, err)
 	}
@@ -99,63 +122,84 @@ func (dl *download) FetchMetadata() error {
 	acceptRanges := resp.Header.Get("Accept-Ranges")
 	dl.supportsRange = strings.ToLower(acceptRanges) == "bytes"
 
-	contentDisposition := resp.Header.Get("Content-Disposition")
-	if contentDisposition != "" {
-		_, params, err := mime.ParseMediaType(contentDisposition)
-		if err == nil && params["filename"] != "" {
-			dl.filename = params["filename"]
+	if dl.Filename == "" {
+		contentDisposition := resp.Header.Get("Content-Disposition")
+		if contentDisposition != "" {
+			_, params, err := mime.ParseMediaType(contentDisposition)
+			if err == nil && params["filename"] != "" {
+				dl.Filename = params["filename"]
+			} else {
+				dl.Filename = dl.filenameFromURI()
+			}
 		} else {
-			dl.filename = dl.filenameFromURI()
+			dl.Filename = dl.filenameFromURI()
 		}
-	} else {
-		dl.filename = dl.filenameFromURI()
 	}
+
+	dl.metadataFetched = true
 
 	return nil
 }
 
-func (dl *download) Fetch() error {
+func (dl *Downloader) Fetch() error {
 	var outFile *os.File
 	var err error
 	var existingSize int64
 	var resumeFromProgress bool
 
-	if dl.boost > 1 && dl.supportsRange {
-		dl.parts = make([]downloadPart, dl.boost)
-		dl.partDownloaded = make([]atomicCounter, dl.boost)
-		for i := 0; i < dl.boost; i++ {
+	if err := dl.ensureDefaults(); err != nil {
+		return err
+	}
+
+	if !dl.metadataFetched {
+		if err := dl.FetchMetadata(); err != nil {
+			return err
+		}
+	}
+
+	reporter := dl.progressReporter()
+	reporter.SetTotal(dl.fileSize)
+
+	if dl.Boost > 1 && dl.supportsRange {
+		dl.parts = make([]downloadPart, dl.Boost)
+		dl.partDownloaded = make([]atomicCounter, dl.Boost)
+		for i := range dl.Boost {
 			start, end := dl.calculatePartBoundary(i)
 			dl.parts[i] = downloadPart{
 				index:     i,
-				uri:       dl.uri,
+				uri:       dl.URI,
 				startByte: start,
 				endByte:   end,
 			}
 		}
 	}
 
-	if dl.resume {
+	if dl.Resume {
 		if err := dl.loadProgress(); err != nil {
 			fmt.Printf("Warning: could not load progress file: %v\n", err)
 		}
 
-		if stat, err := os.Stat(dl.outputPath()); err == nil {
+		if stat, err := os.Stat(dl.OutputPath()); err == nil {
 			existingSize = stat.Size()
 
 			if dl.progress != nil && !dl.progress.Completed {
 				resumeFromProgress = true
 				totalDownloaded := dl.getTotalDownloaded()
 				fmt.Printf("Resuming download using progress file (%.1f%% complete)\n",
-					float64(totalDownloaded)/float64(dl.filesize)*100)
-			} else if existingSize >= int64(dl.filesize) {
-				fmt.Printf("File %s already fully downloaded (%d bytes)\n", dl.filename, existingSize)
+					float64(totalDownloaded)/float64(dl.fileSize)*100)
+				reporter.SetDownloaded(totalDownloaded)
+			} else if existingSize >= int64(dl.fileSize) {
+				fmt.Printf("File %s already fully downloaded (%d bytes)\n", dl.Filename, existingSize)
+				reporter.SetDownloaded(dl.fileSize)
+				reporter.Done()
 				return nil
-			} else if existingSize > 0 && dl.boost == 1 {
+			} else if existingSize > 0 && dl.Boost == 1 {
 				fmt.Printf("Resuming download from %d bytes (%.1f%% complete)\n",
-					existingSize, float64(existingSize)/float64(dl.filesize)*100)
+					existingSize, float64(existingSize)/float64(dl.fileSize)*100)
+				reporter.SetDownloaded(uint64(existingSize))
 			}
 
-			outFile, err = os.OpenFile(dl.outputPath(), os.O_RDWR, 0644)
+			outFile, err = os.OpenFile(dl.OutputPath(), os.O_RDWR, 0644)
 			if err != nil {
 				return fmt.Errorf("cannot open file for resume: %w", err)
 			}
@@ -165,34 +209,34 @@ func (dl *download) Fetch() error {
 				dl.progress = nil
 				resumeFromProgress = false
 			}
-			dl.resume = false
+			dl.Resume = false
 		}
 	}
 
 	if outFile == nil {
-		outFile, err = os.Create(dl.outputPath())
+		outFile, err = os.Create(dl.OutputPath())
 		if err != nil {
 			return fmt.Errorf("cannot create output file: %w", err)
 		}
 	}
 	defer outFile.Close()
 
-	if dl.boost > 1 && dl.supportsRange && !dl.resume {
-		if supportsSparseFiles(dl.workingDir) {
-			if err := createSparseFile(outFile, int64(dl.filesize)); err != nil {
+	if dl.Boost > 1 && dl.supportsRange && !dl.Resume {
+		if supportsSparseFiles(dl.WorkingDir) {
+			if err := createSparseFile(outFile, int64(dl.fileSize)); err != nil {
 				fmt.Printf("Warning: sparse file creation failed, using regular allocation: %v\n", err)
-				if err = outFile.Truncate(int64(dl.filesize)); err != nil {
+				if err = outFile.Truncate(int64(dl.fileSize)); err != nil {
 					return fmt.Errorf("error setting file size: %w", err)
 				}
 			}
 		} else {
-			if err = outFile.Truncate(int64(dl.filesize)); err != nil {
+			if err = outFile.Truncate(int64(dl.fileSize)); err != nil {
 				return fmt.Errorf("error setting file size: %w", err)
 			}
 		}
 	}
 
-	if dl.progress == nil && dl.boost > 1 && dl.supportsRange {
+	if dl.progress == nil && dl.Boost > 1 && dl.supportsRange {
 		dl.initProgress()
 		if err := dl.saveProgress(); err != nil {
 			fmt.Printf("Warning: could not save initial progress: %v\n", err)
@@ -207,28 +251,24 @@ func (dl *download) Fetch() error {
 		}
 	}
 
-	bar := progressbar.DefaultBytes(
-		int64(dl.filesize),
-		"Downloading",
-	)
-
-	if resumeFromProgress {
-		bar.Set64(int64(dl.getTotalDownloaded()))
-	} else if dl.resume && existingSize > 0 && dl.boost == 1 {
-		bar.Set64(existingSize)
+	if dl.Boost == 1 || !dl.supportsRange {
+		err = dl.fetchSingleStream(outFile, reporter, existingSize)
+	} else {
+		err = dl.fetchMultiPart(outFile, reporter, resumeFromProgress)
 	}
 
-	if dl.boost == 1 || !dl.supportsRange {
-		return dl.fetchSingleStream(outFile, bar, existingSize)
+	if err != nil {
+		return err
 	}
 
-	return dl.fetchMultiPart(outFile, bar, resumeFromProgress)
+	reporter.Done()
+	return nil
 }
 
-func (dl *download) fetchSingleStream(outFile *os.File, bar *progressbar.ProgressBar, existingSize int64) error {
-	downloadSize := dl.filesize
-	if dl.resume && existingSize > 0 {
-		downloadSize = dl.filesize - uint64(existingSize)
+func (dl *Downloader) fetchSingleStream(outFile *os.File, reporter ProgressReporter, existingSize int64) error {
+	downloadSize := dl.fileSize
+	if dl.Resume && existingSize > 0 {
+		downloadSize = dl.fileSize - uint64(existingSize)
 	}
 	downloadSizeMB := downloadSize / (1024 * 1024)
 	timeout := minDownloadTimeout + (time.Duration(downloadSizeMB) * timeoutPerMB)
@@ -238,17 +278,16 @@ func (dl *download) fetchSingleStream(outFile *os.File, bar *progressbar.Progres
 		Transport: httpClient.Transport,
 	}
 
-	req, err := http.NewRequestWithContext(dl.ctx, "GET", dl.uri, nil)
+	req, err := http.NewRequestWithContext(dl.Context, "GET", dl.URI, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("User-Agent", "dl/1.1.1")
 
 	startOffset := int64(0)
-	if dl.resume && existingSize > 0 {
+	if dl.Resume && existingSize > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
 		startOffset = existingSize
-		bar.Set64(existingSize)
 	}
 
 	resp, err := singleClient.Do(req)
@@ -271,10 +310,10 @@ func (dl *download) fetchSingleStream(outFile *os.File, bar *progressbar.Progres
 		offset: startOffset,
 	}
 
-	var writer io.Writer = io.MultiWriter(ow, bar)
-	if dl.bandwidthLimit > 0 {
-		limiter := rate.NewLimiter(rate.Limit(dl.bandwidthLimit), int(dl.bandwidthLimit))
-		writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.ctx}
+	var writer io.Writer = io.MultiWriter(ow, &progressWriter{reporter: reporter})
+	if dl.BandwidthLimit > 0 {
+		limiter := rate.NewLimiter(rate.Limit(dl.BandwidthLimit), int(dl.BandwidthLimit))
+		writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.Context}
 	}
 
 	_, err = io.Copy(writer, resp.Body)
@@ -288,12 +327,11 @@ func (dl *download) fetchSingleStream(outFile *os.File, bar *progressbar.Progres
 	return nil
 }
 
-func (dl *download) fetchMultiPart(outFile *os.File, bar *progressbar.ProgressBar, resumeFromProgress bool) error {
+func (dl *Downloader) fetchMultiPart(outFile *os.File, reporter ProgressReporter, resumeFromProgress bool) error {
 	var wg sync.WaitGroup
-	errCh := make(chan error, dl.boost)
-	progressCh := make(chan struct{}, 1)
+	errCh := make(chan error, dl.Boost)
 
-	ctx, cancel := context.WithCancel(dl.ctx)
+	ctx, cancel := context.WithCancel(dl.Context)
 	defer cancel()
 
 	go func() {
@@ -308,39 +346,6 @@ func (dl *download) fetchMultiPart(outFile *os.File, bar *progressbar.ProgressBa
 				if err := dl.saveProgress(); err != nil {
 					fmt.Printf("Warning: could not save progress: %v\n", err)
 				}
-			case <-progressCh:
-				if err := dl.saveProgress(); err != nil {
-					fmt.Printf("Warning: could not save progress: %v\n", err)
-				}
-			}
-		}
-	}()
-
-	go func() {
-		uiTicker := time.NewTicker(100 * time.Millisecond)
-		defer uiTicker.Stop()
-
-		var lastTotal uint64
-		for {
-			select {
-			case <-ctx.Done():
-				var finalTotal uint64
-				for i := range dl.partDownloaded {
-					finalTotal += atomic.LoadUint64(&dl.partDownloaded[i].val)
-				}
-				if diff := finalTotal - lastTotal; diff > 0 {
-					bar.Add64(int64(diff))
-				}
-				return
-			case <-uiTicker.C:
-				var currentTotal uint64
-				for i := range dl.partDownloaded {
-					currentTotal += atomic.LoadUint64(&dl.partDownloaded[i].val)
-				}
-				if diff := currentTotal - lastTotal; diff > 0 {
-					bar.Add64(int64(diff))
-					lastTotal = currentTotal
-				}
 			}
 		}
 	}()
@@ -351,13 +356,12 @@ func (dl *download) fetchMultiPart(outFile *os.File, bar *progressbar.ProgressBa
 			continue
 		}
 
-		wg.Add(1)
-		go func(dp downloadPart) {
-			defer wg.Done()
-			if err := dl.fetchPartRange(dp, outFile); err != nil {
+		part := part
+		wg.Go(func() {
+			if err := dl.fetchPartRange(part, outFile, reporter); err != nil {
 				errCh <- err
 			}
-		}(part)
+		})
 	}
 
 	wg.Wait()
@@ -389,28 +393,28 @@ func (dl *download) fetchMultiPart(outFile *os.File, bar *progressbar.ProgressBa
 	return nil
 }
 
-func (dl *download) fetchPartRange(p downloadPart, outFile *os.File) error {
+func (dl *Downloader) fetchPartRange(p downloadPart, outFile *os.File, reporter ProgressReporter) error {
 	var lastErr error
 	baseDelay := 1 * time.Second
 
-	for i := 0; i < dl.retries; i++ {
-		err := dl.fetchPartOnce(p, outFile)
+	for i := range dl.Retries {
+		err := dl.fetchPartOnce(p, outFile, reporter)
 		if err == nil {
 			return nil
 		}
 		lastErr = err
 
-		if i < dl.retries-1 {
+		if i < dl.Retries-1 {
 			delay := baseDelay * time.Duration(math.Pow(2, float64(i)))
 			fmt.Printf("Part %d failed (attempt %d/%d): %v. Retrying in %v...\n",
-				p.index, i+1, dl.retries, err, delay)
+				p.index, i+1, dl.Retries, err, delay)
 			time.Sleep(delay)
 		}
 	}
-	return fmt.Errorf("part %d failed after %d retries: %w", p.index, dl.retries, lastErr)
+	return fmt.Errorf("part %d failed after %d retries: %w", p.index, dl.Retries, lastErr)
 }
 
-func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File) error {
+func (dl *Downloader) fetchPartOnce(p downloadPart, outFile *os.File, reporter ProgressReporter) error {
 	startByte := p.startByte
 	alreadyDownloaded := uint64(0)
 
@@ -438,7 +442,7 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File) error {
 	}
 
 	byteRange := fmt.Sprintf("bytes=%d-%d", startByte, p.endByte)
-	req, err := http.NewRequestWithContext(dl.ctx, "GET", p.uri, nil)
+	req, err := http.NewRequestWithContext(dl.Context, "GET", p.uri, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -464,18 +468,19 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File) error {
 		if n > 0 {
 			writeOffset += int64(n)
 			atomic.AddUint64(&dl.partDownloaded[partIndex].val, uint64(n))
+			reporter.AddDownloaded(uint64(n))
 		}
 		return n, err
 	}
 
 	var writer io.Writer = WriterFunc(trackerWriter)
-	if dl.bandwidthLimit > 0 {
-		perPartLimit := dl.bandwidthLimit / int64(dl.boost)
+	if dl.BandwidthLimit > 0 {
+		perPartLimit := dl.BandwidthLimit / int64(dl.Boost)
 		if perPartLimit < 1024 {
 			perPartLimit = 1024
 		}
 		limiter := rate.NewLimiter(rate.Limit(perPartLimit), int(perPartLimit))
-		writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.ctx}
+		writer = &rateLimitedWriter{w: writer, limiter: limiter, ctx: dl.Context}
 	}
 
 	buf := make([]byte, 1024*1024)
@@ -488,21 +493,21 @@ func (dl *download) fetchPartOnce(p downloadPart, outFile *os.File) error {
 	return nil
 }
 
-func (dl *download) calculatePartBoundary(part int) (uint64, uint64) {
-	chunkSize := dl.filesize / uint64(dl.boost)
+func (dl *Downloader) calculatePartBoundary(part int) (uint64, uint64) {
+	chunkSize := dl.fileSize / uint64(dl.Boost)
 	startByte := uint64(part) * chunkSize
 	var endByte uint64
 
-	if part == dl.boost-1 {
-		endByte = dl.filesize - 1
+	if part == dl.Boost-1 {
+		endByte = dl.fileSize - 1
 	} else {
 		endByte = startByte + chunkSize - 1
 	}
 	return startByte, endByte
 }
 
-func (dl *download) filenameFromURI() string {
-	splitURI := strings.Split(dl.uri, "/")
+func (dl *Downloader) filenameFromURI() string {
+	splitURI := strings.Split(dl.URI, "/")
 	filename := splitURI[len(splitURI)-1]
 	if idx := strings.Index(filename, "?"); idx != -1 {
 		filename = filename[:idx]
@@ -511,6 +516,42 @@ func (dl *download) filenameFromURI() string {
 	return filename
 }
 
-func (dl *download) outputPath() string {
-	return fmt.Sprintf("%s%c%s", dl.workingDir, os.PathSeparator, dl.filename)
+func (dl *Downloader) OutputPath() string {
+	return fmt.Sprintf("%s%c%s", dl.WorkingDir, os.PathSeparator, dl.Filename)
+}
+
+func (dl *Downloader) ensureDefaults() error {
+	if dl.URI == "" {
+		return fmt.Errorf("uri is required")
+	}
+
+	if dl.Context == nil {
+		dl.Context = context.Background()
+	}
+
+	if dl.WorkingDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get working directory: %w", err)
+		}
+		dl.WorkingDir = wd
+	}
+
+	if dl.Boost <= 0 {
+		dl.Boost = DefaultBoost
+	}
+
+	if dl.Retries <= 0 {
+		dl.Retries = DefaultRetries
+	}
+
+	return nil
+}
+
+func (dl *Downloader) progressReporter() ProgressReporter {
+	if dl.Progress == nil {
+		return noopProgressReporter{}
+	}
+
+	return dl.Progress
 }

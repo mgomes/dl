@@ -24,13 +24,51 @@ Requires Go 1.23+
 ```bash
 git clone https://github.com/mgomes/dl.git
 cd dl
-go build
+go build -o dl ./cmd/dl
 ```
 
 ## Usage
 
 ```bash
 dl <url> [url2] [url3] ...
+```
+
+## Library usage
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/mgomes/dl"
+)
+
+func main() {
+	ctx := context.Background()
+	downloader := dl.Downloader{
+		URI:        "https://example.com/file.zip",
+		Context:    ctx,
+		WorkingDir: ".",
+		Boost:      4,
+		Retries:    3,
+		Resume:     true,
+	}
+
+	if err := downloader.FetchMetadata(); err != nil {
+		fmt.Printf("metadata error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := downloader.Fetch(); err != nil {
+		fmt.Printf("download error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("saved to", downloader.OutputPath())
+}
 ```
 
 ### Options

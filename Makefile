@@ -24,7 +24,7 @@ all: help
 .PHONY: build
 build:
 	@echo "Building $(BINARY_NAME)..."
-	@$(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME) .
+	@$(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME) ./cmd/dl
 
 # Build for all platforms
 .PHONY: build-all
@@ -34,21 +34,21 @@ build-all: build-linux build-darwin build-windows
 .PHONY: build-linux
 build-linux:
 	@echo "Building for Linux..."
-	@GOOS=linux GOARCH=amd64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-linux-amd64 .
-	@GOOS=linux GOARCH=arm64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-linux-arm64 .
+	@GOOS=linux GOARCH=amd64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-linux-amd64 ./cmd/dl
+	@GOOS=linux GOARCH=arm64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-linux-arm64 ./cmd/dl
 
 # Build for macOS
 .PHONY: build-darwin
 build-darwin:
 	@echo "Building for macOS..."
-	@GOOS=darwin GOARCH=amd64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-darwin-amd64 .
-	@GOOS=darwin GOARCH=arm64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-darwin-arm64 .
+	@GOOS=darwin GOARCH=amd64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-darwin-amd64 ./cmd/dl
+	@GOOS=darwin GOARCH=arm64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-darwin-arm64 ./cmd/dl
 
 # Build for Windows
 .PHONY: build-windows
 build-windows:
 	@echo "Building for Windows..."
-	@GOOS=windows GOARCH=amd64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-windows-amd64.exe .
+	@GOOS=windows GOARCH=amd64 $(GO_BUILD) $(LDFLAGS) -o $(BINARY_NAME)-windows-amd64.exe ./cmd/dl
 
 # Run tests
 .PHONY: test
@@ -101,7 +101,7 @@ clean:
 .PHONY: install
 install:
 	@echo "Installing $(BINARY_NAME)..."
-	@$(GO) install $(LDFLAGS) .
+	@$(GO) install $(LDFLAGS) ./cmd/dl
 	@echo "Installed to $(shell go env GOPATH)/bin/$(BINARY_NAME)"
 	@if ! echo $$PATH | grep -q "$(shell go env GOPATH)/bin"; then \
 		echo ""; \
@@ -136,7 +136,7 @@ test-resume: build
 .PHONY: dev
 dev:
 	@echo "Building with race detector..."
-	@$(GO_BUILD) -race $(LDFLAGS) -o $(BINARY_NAME) .
+	@$(GO_BUILD) -race $(LDFLAGS) -o $(BINARY_NAME) ./cmd/dl
 	@echo "Ready for development testing"
 
 # Show help
